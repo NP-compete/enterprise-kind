@@ -1,0 +1,14 @@
+---
+# The CA itself is generated on the host by scripts/pki.sh before the cluster
+# exists (the API server needs it at kubeadm time for OIDC), and loaded into
+# cert-manager as a Secret by scripts/platform-install.sh. cert-manager only
+# issues leaf certificates from it.
+#
+# Trust it once with `make trust-ca` and every https://*.<domain> URL is green.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: platform-ca
+spec:
+  ca:
+    secretName: platform-root-ca

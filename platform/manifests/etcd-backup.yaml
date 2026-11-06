@@ -1,0 +1,103 @@
+---
+# Scheduled etcd snapshots, pushed into their own object-store bucket.
+#
+# They must NOT share Velero's bucket: Velero validates that its store has no
+# unexpected top-level directories and marks the location Unavailable if it does.
+#
+# Velero backs up Kubernetes *resources*; this backs up the datastore itself,
+# which is what you need if etcd is corrupted rather than a workload deleted.
+# Runs on a control-plane node, reads the etcd client certs from the host, and
+# uploads through SeaweedFS's filer API.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etcd-snapshot
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: etcd-snapshot
+    owner: platform-team
+spec:
+  schedule: "0 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: etcd-snapshot
+        spec:
+          restartPolicy: OnFailure
+          # hostNetwork is needed to reach etcd on 127.0.0.1:2379, but it also
+          # means the node's resolver is used -- and the node cannot resolve
+          # cluster DNS. ClusterFirstWithHostNet restores it so the upload can
+          # find the object store.
+          hostNetwork: true
+          dnsPolicy: ClusterFirstWithHostNet
+          nodeSelector:
+            node-role.kubernetes.io/control-plane: ""
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+          securityContext:
+            runAsUser: 0
+          initContainers:
+            # registry.k8s.io/etcd is distroless -- there is no /bin/sh, so
+            # etcdctl has to be the entrypoint rather than a shell wrapper.
+            # The timestamp is applied by the upload container, which has one.
+            - name: snapshot
+              image: ${NODE_IMAGE_ETCD}
+              command: ["etcdctl"]
+              args:
+                - --endpoints=https://127.0.0.1:2379
+                - --cacert=/etc/kubernetes/pki/etcd/ca.crt
+                - --cert=/etc/kubernetes/pki/etcd/server.crt
+                - --key=/etc/kubernetes/pki/etcd/server.key
+                - snapshot
+                - save
+                - /snap/etcd.db
+              env:
+                - name: ETCDCTL_API
+                  value: "3"
+              volumeMounts:
+                - { name: etcd-certs, mountPath: /etc/kubernetes/pki/etcd, readOnly: true }
+                - { name: snap, mountPath: /snap }
+              resources:
+                requests: { cpu: 50m, memory: 128Mi }
+                limits: { memory: 512Mi }
+          containers:
+            - name: upload
+              image: docker.io/chrislusf/seaweedfs:3.80
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+                  test -s /snap/etcd.db || { echo "no snapshot produced"; exit 1; }
+                  ls -lh /snap/etcd.db
+                  # The SeaweedFS image ships busybox wget but no curl, so use
+                  # the bundled `weed filer.copy` rather than a multipart POST.
+                  mv /snap/etcd.db "/snap/etcd-${STAMP}.db"
+                  echo "uploading etcd-${STAMP}.db"
+                  weed filer.copy "/snap/etcd-${STAMP}.db" \
+                    http://s3.storage.svc.cluster.local:8888/buckets/etcd/
+                  # Prove it landed rather than trusting the exit code.
+                  wget -qO- "http://s3.storage.svc.cluster.local:8888/buckets/etcd/?limit=50" \
+                    | grep -q "etcd-${STAMP}.db" || { echo "upload not visible in filer"; exit 1; }
+                  echo "  uploaded and verified: etcd-${STAMP}.db"
+              volumeMounts:
+                - { name: snap, mountPath: /snap }
+              resources:
+                requests: { cpu: 20m, memory: 64Mi }
+                limits: { memory: 256Mi }
+          volumes:
+            - name: etcd-certs
+              hostPath:
+                path: /etc/kubernetes/pki/etcd
+                type: Directory
+            - name: snap
+              emptyDir: {}

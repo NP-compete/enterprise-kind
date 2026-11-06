@@ -1,0 +1,31 @@
+---
+# Structured API server authentication: trust Keycloak's `platform` realm so a
+# Headlamp user's ID token maps to a real Kubernetes identity with real RBAC.
+#
+# Rendered to cluster/policies/authentication-config.yaml by
+# scripts/apiserver-oidc.sh, which also mounts it into the control-plane node
+# and adds the --authentication-config flag.
+apiVersion: apiserver.config.k8s.io/${AUTHN_API_VERSION}
+kind: AuthenticationConfiguration
+jwt:
+  - issuer:
+      url: https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/realms/platform
+      # Headlamp is the only client whose tokens are presented to the API server.
+      audiences:
+        - headlamp
+      certificateAuthority: |
+${PLATFORM_CA_PEM_INDENTED8}
+    claimMappings:
+      username:
+        claim: preferred_username
+        # Namespaced so an SSO user can never collide with a ServiceAccount or
+        # a cert-based identity such as kubernetes-admin.
+        prefix: "oidc:"
+      groups:
+        claim: groups
+        prefix: "oidc:"
+    claimValidationRules:
+      # `requiredValue` compares as a string; email_verified is a JSON boolean,
+      # so it has to be checked with a CEL expression instead.
+      - expression: "claims.email_verified == true"
+        message: "the Keycloak account must have a verified email address"

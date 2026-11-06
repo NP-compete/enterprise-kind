@@ -1,0 +1,97 @@
+---
+# Headlamp is the general-purpose cluster UI: browse/edit every resource, exec
+# into pods, stream logs, read events. Sign in with the token from `make token`.
+replicaCount: 1
+
+config:
+  baseURL: ""
+  pluginsDir: /build/plugins
+  oidc:
+    secret:
+      create: true
+      name: oidc
+    clientID: headlamp
+    clientSecret: "${OIDC_SECRET_HEADLAMP}"
+    issuerURL: https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/realms/platform
+    scopes: "profile,email,groups"
+    callbackURL: https://headlamp.${BASE_DOMAIN}${URL_SUFFIX}/oidc-callback
+    usePKCE: true
+    useCookie: true
+    # Land straight on the Keycloak login page instead of the token prompt.
+    autoLogin: true
+
+# Headlamp has no env hook for SSL_CERT_FILE, so rebuild its trust store:
+# copy the image's CA bundle into an emptyDir and append the platform CA.
+initContainers:
+  - name: ca-bundle
+    image: ghcr.io/headlamp-k8s/headlamp:v0.46.0
+    imagePullPolicy: IfNotPresent
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        cp -aL /etc/ssl/certs/. /work/
+        cat /platform-ca/ca.crt >> /work/ca-certificates.crt
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 100
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+    volumeMounts:
+      - name: ca-bundle
+        mountPath: /work
+      - name: platform-ca
+        mountPath: /platform-ca
+        readOnly: true
+
+volumes:
+  - name: ca-bundle
+    emptyDir: {}
+  - name: platform-ca
+    configMap:
+      name: platform-ca
+
+volumeMounts:
+  - name: ca-bundle
+    mountPath: /etc/ssl/certs
+    readOnly: true
+
+ingress:
+  enabled: true
+  ingressClassName: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: platform-ca
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  hosts:
+    - host: headlamp.${BASE_DOMAIN}
+      paths:
+        - path: /
+          type: Prefix
+  tls:
+    - secretName: headlamp-tls
+      hosts: ["headlamp.${BASE_DOMAIN}"]
+
+serviceAccount:
+  create: true
+  name: headlamp
+
+clusterRoleBinding:
+  create: true
+
+resources:
+  requests: { cpu: 50m, memory: 96Mi }
+  limits: { memory: 384Mi }
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 100
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop: ["ALL"]

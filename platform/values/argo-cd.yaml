@@ -1,0 +1,104 @@
+---
+global:
+  domain: argocd.${BASE_DOMAIN}
+
+configs:
+  params:
+    # TLS is terminated at ingress-nginx; argocd-server speaks plain HTTP behind it.
+    server.insecure: true
+    application.namespaces: "*"
+  cm:
+    exec.enabled: "true"
+    # Keycloak is the only way in. `make break-glass` flips this back on.
+    admin.enable: "false"
+    statusbadge.enabled: "true"
+    timeout.reconciliation: 60s
+    url: https://argocd.${BASE_DOMAIN}${URL_SUFFIX}
+    oidc.config: |
+      name: Keycloak
+      issuer: https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/realms/platform
+      clientID: argocd
+      clientSecret: $oidc.keycloak.clientSecret
+      requestedScopes: ["openid", "profile", "email", "groups"]
+      requestedIDTokenClaims:
+        groups:
+          essential: true
+      rootCA: |
+${PLATFORM_CA_PEM_INDENTED}
+    resource.exclusions: |
+      - apiGroups: ["cilium.io"]
+        kinds: ["CiliumIdentity"]
+        clusters: ["*"]
+  secret:
+    extra:
+      oidc.keycloak.clientSecret: "${OIDC_SECRET_ARGOCD}"
+  rbac:
+    policy.default: ""
+    scopes: "[groups, email]"
+    policy.csv: |
+      p, role:platform-admin, applications, *, */*, allow
+      p, role:platform-admin, clusters, *, *, allow
+      p, role:platform-admin, repositories, *, *, allow
+      p, role:platform-admin, projects, *, *, allow
+      p, role:platform-admin, logs, get, */*, allow
+      p, role:platform-admin, exec, create, */*, allow
+      # Keycloak group -> Argo CD role
+      g, platform-admins, role:platform-admin
+      g, platform-viewers, role:readonly
+
+server:
+  replicas: 1
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: platform-ca
+      nginx.ingress.kubernetes.io/backend-protocol: HTTP
+    hostname: argocd.${BASE_DOMAIN}
+    path: /
+    pathType: Prefix
+    tls: true
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 512Mi }
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: false
+
+controller:
+  replicas: 1
+  resources:
+    requests: { cpu: 100m, memory: 512Mi }
+    limits: { memory: 2Gi }
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: false
+
+repoServer:
+  replicas: 1
+  resources:
+    requests: { cpu: 50m, memory: 192Mi }
+    limits: { memory: 1Gi }
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: false
+
+applicationSet:
+  replicas: 1
+  resources:
+    requests: { cpu: 20m, memory: 96Mi }
+    limits: { memory: 384Mi }
+
+redis:
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { memory: 256Mi }
+
+notifications:
+  enabled: false
+
+dex:
+  enabled: false

@@ -1,0 +1,304 @@
+---
+fullnameOverride: kps
+crds:
+  enabled: true
+
+alertmanager:
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: platform-ca
+      # Alertmanager has no login of its own -- oauth2-proxy supplies one.
+      nginx.ingress.kubernetes.io/auth-url: http://oauth2-proxy.identity.svc.cluster.local/oauth2/auth
+      nginx.ingress.kubernetes.io/auth-signin: https://auth.${BASE_DOMAIN}${URL_SUFFIX}/oauth2/start?rd=$scheme://$best_http_host$escaped_request_uri
+      nginx.ingress.kubernetes.io/auth-response-headers: X-Auth-Request-User,X-Auth-Request-Email,X-Auth-Request-Groups
+    hosts: ["alertmanager.${BASE_DOMAIN}"]
+    paths: ["/"]
+    pathType: Prefix
+    tls:
+      - secretName: alertmanager-tls
+        hosts: ["alertmanager.${BASE_DOMAIN}"]
+  # Without a receiver Alertmanager silently discards everything, so the whole
+  # alerting path is untestable. Everything goes to the in-cluster sink, whose
+  # log lines Alloy ships to Loki.
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      group_by: [alertname, namespace]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      receiver: platform-sink
+      routes:
+        - receiver: platform-sink
+          matchers: [severity =~ "warning|critical"]
+          continue: true
+    receivers:
+      - name: platform-sink
+        webhook_configs:
+          - url: http://alert-sink.observability.svc.cluster.local/
+            send_resolved: true
+    inhibit_rules:
+      - source_matchers: [severity = "critical"]
+        target_matchers: [severity = "warning"]
+        equal: [alertname, namespace]
+  alertmanagerSpec:
+    replicas: 1
+    retention: 120h
+    resources:
+      requests: { cpu: 20m, memory: 64Mi }
+      limits: { memory: 256Mi }
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: standard
+          accessModes: ["ReadWriteOnce"]
+          resources: { requests: { storage: 2Gi } }
+
+prometheus:
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: platform-ca
+      # Prometheus has no login of its own -- oauth2-proxy supplies one.
+      nginx.ingress.kubernetes.io/auth-url: http://oauth2-proxy.identity.svc.cluster.local/oauth2/auth
+      nginx.ingress.kubernetes.io/auth-signin: https://auth.${BASE_DOMAIN}${URL_SUFFIX}/oauth2/start?rd=$scheme://$best_http_host$escaped_request_uri
+      nginx.ingress.kubernetes.io/auth-response-headers: X-Auth-Request-User,X-Auth-Request-Email,X-Auth-Request-Groups
+    hosts: ["prometheus.${BASE_DOMAIN}"]
+    paths: ["/"]
+    pathType: Prefix
+    tls:
+      - secretName: prometheus-tls
+        hosts: ["prometheus.${BASE_DOMAIN}"]
+  prometheusSpec:
+    replicas: 1
+    retention: 15d
+    retentionSize: 8GB
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+    enableRemoteWriteReceiver: true
+    enableFeatures:
+      - exemplar-storage
+    # Discover ServiceMonitors/PodMonitors/Rules from every namespace, not just this release.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+    externalLabels:
+      cluster: ${CLUSTER_NAME}
+    resources:
+      requests: { cpu: 200m, memory: 1Gi }
+      limits: { memory: 3Gi }
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: standard
+          accessModes: ["ReadWriteOnce"]
+          resources: { requests: { storage: 12Gi } }
+
+grafana:
+  enabled: true
+  replicas: 1
+  adminPassword: ${GRAFANA_ADMIN_PASSWORD}
+  defaultDashboardsTimezone: browser
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: platform-ca
+    hosts: ["grafana.${BASE_DOMAIN}"]
+    path: /
+    pathType: Prefix
+    tls:
+      - secretName: grafana-tls
+        hosts: ["grafana.${BASE_DOMAIN}"]
+  persistence:
+    enabled: true
+    storageClassName: standard
+    size: 4Gi
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 768Mi }
+  # The platform CA, so Grafana trusts https://keycloak.${BASE_DOMAIN}.
+  extraConfigmapMounts:
+    - name: platform-ca
+      mountPath: /etc/grafana/ca
+      configMap: platform-ca
+      readOnly: true
+  # The chart rejects literal secrets in grafana.ini, so the OIDC client secret
+  # is mounted and read back with $__file{}. Created by scripts/platform-install.sh.
+  extraSecretMounts:
+    - name: grafana-oidc
+      secretName: grafana-oidc
+      mountPath: /etc/grafana/oidc
+      readOnly: true
+      defaultMode: 0440
+  grafana.ini:
+    server:
+      root_url: https://grafana.${BASE_DOMAIN}${URL_SUFFIX}
+    users:
+      viewers_can_edit: true
+    auth.anonymous:
+      enabled: false
+    auth:
+      # Keycloak is the only way in. `make break-glass` re-enables the local
+      # admin form temporarily if SSO itself is broken.
+      disable_login_form: true
+      oauth_auto_login: true
+      signout_redirect_url: https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/realms/platform/protocol/openid-connect/logout?post_logout_redirect_uri=https%3A%2F%2Fgrafana.${BASE_DOMAIN}${URL_SUFFIX}%2Flogin
+    auth.generic_oauth:
+      enabled: true
+      name: Keycloak
+      icon: signin
+      allow_sign_up: true
+      # Grafana 12 ignores the old [auth] oauth_auto_login; this is the live one.
+      auto_login: true
+      client_id: grafana
+      client_secret: $__file{/etc/grafana/oidc/client_secret}
+      scopes: openid email profile groups
+      email_attribute_path: email
+      login_attribute_path: preferred_username
+      name_attribute_path: name
+      groups_attribute_path: groups
+      auth_url: https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/realms/platform/protocol/openid-connect/auth
+      token_url: https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/realms/platform/protocol/openid-connect/token
+      api_url: https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/realms/platform/protocol/openid-connect/userinfo
+      tls_client_ca: /etc/grafana/ca/ca.crt
+      use_pkce: true
+      use_refresh_token: true
+      role_attribute_strict: false
+      role_attribute_path: contains(groups[*], 'platform-admins') && 'Admin' || contains(groups[*], 'platform-viewers') && 'Viewer' || 'Viewer'
+    feature_toggles:
+      enable: traceToMetrics correlations
+    explore:
+      enabled: true
+  sidecar:
+    dashboards:
+      enabled: true
+      searchNamespace: ALL
+      label: grafana_dashboard
+      folderAnnotation: grafana_folder
+      provider:
+        foldersFromFilesStructure: true
+    datasources:
+      enabled: true
+      searchNamespace: ALL
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      uid: loki
+      access: proxy
+      url: http://loki-gateway.observability.svc.cluster.local
+      jsonData:
+        timeout: 60
+        maxLines: 1000
+        derivedFields:
+          - name: TraceID
+            matcherRegex: '"trace_id":"(\w+)"'
+            url: '$${__value.raw}'
+            datasourceUid: tempo
+    - name: Tempo
+      type: tempo
+      uid: tempo
+      access: proxy
+      url: http://tempo.observability.svc.cluster.local:3200
+      jsonData:
+        tracesToLogsV2:
+          datasourceUid: loki
+          spanStartTimeShift: -5m
+          spanEndTimeShift: 5m
+          filterByTraceID: true
+          tags: [{ key: "service.name", value: "service_name" }]
+        tracesToMetrics:
+          datasourceUid: prometheus
+          tags: [{ key: "service.name", value: "service" }]
+        serviceMap:
+          datasourceUid: prometheus
+        nodeGraph:
+          enabled: true
+        lokiSearch:
+          datasourceUid: loki
+
+# --- control-plane scrape targets, wired for kind ---
+kubeApiServer:
+  enabled: true
+kubelet:
+  enabled: true
+  serviceMonitor:
+    cAdvisor: true
+    probes: true
+    resource: true
+    # The chart still defaults to the long-removed /metrics/resource/v1alpha1 path.
+    resourcePath: /metrics/resource
+kubeControllerManager:
+  enabled: true
+  endpoints: []
+  service:
+    enabled: true
+    port: 10257
+    targetPort: 10257
+  serviceMonitor:
+    https: true
+    insecureSkipVerify: true
+kubeScheduler:
+  enabled: true
+  service:
+    enabled: true
+    port: 10259
+    targetPort: 10259
+  serviceMonitor:
+    https: true
+    insecureSkipVerify: true
+kubeProxy:
+  enabled: true
+  service:
+    enabled: true
+    port: 10249
+    targetPort: 10249
+kubeEtcd:
+  enabled: true
+  service:
+    enabled: true
+    port: 2381
+    targetPort: 2381
+  serviceMonitor:
+    scheme: http
+kubeDns:
+  enabled: false
+coreDns:
+  enabled: true
+
+kube-state-metrics:
+  metricLabelsAllowlist:
+    - pods=[*]
+    - deployments=[*]
+    - namespaces=[*]
+  resources:
+    requests: { cpu: 20m, memory: 96Mi }
+    limits: { memory: 384Mi }
+
+prometheus-node-exporter:
+  resources:
+    requests: { cpu: 20m, memory: 32Mi }
+    limits: { memory: 128Mi }
+
+prometheusOperator:
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 512Mi }
+  admissionWebhooks:
+    certManager:
+      enabled: false
+
+defaultRules:
+  create: true
+  rules:
+    # These two fire constantly on kind because the control plane is a container.
+    kubeProxy: true
+    etcd: true
+    kubeSchedulerAlerting: false
+    kubeControllerManager: false

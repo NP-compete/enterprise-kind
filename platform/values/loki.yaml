@@ -1,0 +1,104 @@
+---
+# Single-binary Loki on the local-path PVC. Enough for a laptop-scale enterprise
+# replica; swap deploymentMode to SimpleScalable + object storage for real clusters.
+deploymentMode: SingleBinary
+
+loki:
+  auth_enabled: false
+  commonConfig:
+    replication_factor: 1
+  storage:
+    # Object storage, so logs survive losing the node Loki happens to run on.
+    type: s3
+    bucketNames:
+      chunks: loki
+      ruler: loki
+      admin: loki
+    s3:
+      endpoint: http://s3.storage.svc.cluster.local:8333
+      region: us-east-1
+      accessKeyId: ${S3_ACCESS_KEY}
+      secretAccessKey: ${S3_SECRET_KEY}
+      s3ForcePathStyle: true
+      insecure: true
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: s3
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+  limits_config:
+    retention_period: 168h
+    ingestion_rate_mb: 16
+    ingestion_burst_size_mb: 32
+    max_query_series: 5000
+    max_cache_freshness_per_query: 10m
+    reject_old_samples: true
+    reject_old_samples_max_age: 168h
+    volume_enabled: true
+    allow_structured_metadata: true
+  compactor:
+    retention_enabled: true
+    delete_request_store: s3
+  rulerConfig:
+    storage:
+      type: local
+      local:
+        directory: /var/loki/rules
+  server:
+    grpc_server_max_recv_msg_size: 16777216
+    grpc_server_max_send_msg_size: 16777216
+
+singleBinary:
+  replicas: 1
+  resources:
+    requests: { cpu: 100m, memory: 384Mi }
+    limits: { memory: 2Gi }
+  persistence:
+    enabled: true
+    storageClass: standard
+    size: 12Gi
+
+# Everything below is the distributed topology -- off in SingleBinary mode.
+backend: { replicas: 0 }
+read: { replicas: 0 }
+write: { replicas: 0 }
+ingester: { replicas: 0 }
+querier: { replicas: 0 }
+queryFrontend: { replicas: 0 }
+queryScheduler: { replicas: 0 }
+distributor: { replicas: 0 }
+compactor: { replicas: 0 }
+indexGateway: { replicas: 0 }
+bloomCompactor: { replicas: 0 }
+bloomGateway: { replicas: 0 }
+
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+minio:
+  enabled: false
+
+gateway:
+  enabled: true
+  replicas: 1
+  resources:
+    requests: { cpu: 20m, memory: 32Mi }
+    limits: { memory: 128Mi }
+
+monitoring:
+  selfMonitoring:
+    enabled: false
+    grafanaAgent:
+      installOperator: false
+  lokiCanary:
+    enabled: false
+
+test:
+  enabled: false
+lokiCanary:
+  enabled: false

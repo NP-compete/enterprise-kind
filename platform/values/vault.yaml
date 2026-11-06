@@ -1,0 +1,74 @@
+---
+# HashiCorp Vault as the secret store of record.
+#
+# Raft storage on a PVC, not dev mode: dev mode auto-unseals but keeps
+# everything in memory, and this VM has OOM-killed the cluster more than once.
+# Persistence means real unsealing -- see scripts/vault-init.sh for how that is
+# handled locally, and the honest caveat in docs/secrets.md.
+global:
+  enabled: true
+  tlsDisable: true   # TLS terminates at the platform ingress
+
+injector:
+  # The Agent Injector mutates pods; External Secrets Operator covers our use
+  # case without that blast radius, so it stays off.
+  enabled: false
+
+server:
+  image:
+    repository: hashicorp/vault
+  standalone:
+    enabled: true
+    config: |
+      ui = true
+      listener "tcp" {
+        address     = "0.0.0.0:8200"
+        tls_disable = 1
+      }
+      storage "raft" {
+        path    = "/vault/data"
+        node_id = "vault-0"
+      }
+      disable_mlock = true
+      service_registration "kubernetes" {}
+
+  dataStorage:
+    enabled: true
+    size: 2Gi
+    storageClass: standard
+
+  ha:
+    enabled: false
+
+  priorityClassName: platform-critical
+
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 1Gi }
+
+  readinessProbe:
+    # Default treats "sealed" as not-ready, which deadlocks: the unseal job
+    # cannot reach a Service with no ready endpoints. Accept sealed-but-up.
+    enabled: true
+    path: /v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204
+
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: platform-ca
+      nginx.ingress.kubernetes.io/auth-url: http://oauth2-proxy.identity.svc.cluster.local/oauth2/auth
+      nginx.ingress.kubernetes.io/auth-signin: https://auth.${BASE_DOMAIN}${URL_SUFFIX}/oauth2/start?rd=$scheme://$best_http_host$escaped_request_uri
+      nginx.ingress.kubernetes.io/auth-response-headers: X-Auth-Request-User,X-Auth-Request-Email,X-Auth-Request-Groups
+    hosts:
+      - host: vault.${BASE_DOMAIN}
+    tls:
+      - secretName: vault-tls
+        hosts: ["vault.${BASE_DOMAIN}"]
+
+ui:
+  enabled: true
+  serviceType: ClusterIP
+
+csi:
+  enabled: false

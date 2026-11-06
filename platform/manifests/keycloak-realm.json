@@ -1,0 +1,139 @@
+{
+  "realm": "platform",
+  "displayName": "kind platform",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": true,
+  "rememberMe": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "verifyEmail": false,
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "maxFailureWaitSeconds": 900,
+  "failureFactor": 10,
+  "accessTokenLifespan": 900,
+  "ssoSessionIdleTimeout": 3600,
+  "ssoSessionMaxLifespan": 36000,
+  "offlineSessionIdleTimeout": 2592000,
+
+  "groups": [
+    { "name": "platform-admins", "path": "/platform-admins" },
+    { "name": "platform-viewers", "path": "/platform-viewers" }
+  ],
+
+
+  "clients": [
+    {
+      "clientId": "grafana",
+      "name": "Grafana",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "${OIDC_SECRET_GRAFANA}",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "rootUrl": "https://grafana.${BASE_DOMAIN}${URL_SUFFIX}",
+      "baseUrl": "/",
+      "redirectUris": ["https://grafana.${BASE_DOMAIN}${URL_SUFFIX}/login/generic_oauth"],
+      "webOrigins": ["https://grafana.${BASE_DOMAIN}${URL_SUFFIX}"],
+      "attributes": {
+        "post.logout.redirect.uris": "https://grafana.${BASE_DOMAIN}${URL_SUFFIX}/*",
+        "frontchannel.logout.session.required": "true"
+      }
+    },
+    {
+      "clientId": "argocd",
+      "name": "Argo CD",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "${OIDC_SECRET_ARGOCD}",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "rootUrl": "https://argocd.${BASE_DOMAIN}${URL_SUFFIX}",
+      "baseUrl": "/applications",
+      "redirectUris": [
+        "https://argocd.${BASE_DOMAIN}${URL_SUFFIX}/auth/callback",
+        "http://localhost:8085/auth/callback"
+      ],
+      "webOrigins": ["https://argocd.${BASE_DOMAIN}${URL_SUFFIX}"],
+      "attributes": {
+        "post.logout.redirect.uris": "https://argocd.${BASE_DOMAIN}${URL_SUFFIX}/*"
+      }
+    },
+    {
+      "clientId": "headlamp",
+      "name": "Headlamp",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "${OIDC_SECRET_HEADLAMP}",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "rootUrl": "https://headlamp.${BASE_DOMAIN}${URL_SUFFIX}",
+      "baseUrl": "/",
+      "redirectUris": ["https://headlamp.${BASE_DOMAIN}${URL_SUFFIX}/oidc-callback"],
+      "webOrigins": ["https://headlamp.${BASE_DOMAIN}${URL_SUFFIX}"],
+      "attributes": {
+        "post.logout.redirect.uris": "https://headlamp.${BASE_DOMAIN}${URL_SUFFIX}/*"
+      }
+    },
+    {
+      "clientId": "oauth2-proxy",
+      "name": "Platform gateway (Prometheus, Alertmanager)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "${OIDC_SECRET_OAUTH2PROXY}",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "rootUrl": "https://auth.${BASE_DOMAIN}${URL_SUFFIX}",
+      "baseUrl": "/",
+      "redirectUris": ["https://auth.${BASE_DOMAIN}${URL_SUFFIX}/oauth2/callback"],
+      "webOrigins": [
+        "https://auth.${BASE_DOMAIN}${URL_SUFFIX}",
+        "https://prometheus.${BASE_DOMAIN}${URL_SUFFIX}",
+        "https://alertmanager.${BASE_DOMAIN}${URL_SUFFIX}"
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "https://*.${BASE_DOMAIN}${URL_SUFFIX}/*"
+      }
+    }
+  ],
+
+  "users": [
+    {
+      "username": "${SSO_ADMIN_USERNAME}",
+      "email": "${SSO_ADMIN_USERNAME}@kind.local",
+      "emailVerified": true,
+      "firstName": "Platform",
+      "lastName": "Admin",
+      "enabled": true,
+      "credentials": [
+        { "type": "password", "value": "${SSO_ADMIN_PASSWORD}", "temporary": false }
+      ],
+      "groups": ["/platform-admins"],
+      "realmRoles": ["default-roles-platform"]
+    },
+    {
+      "username": "${SSO_VIEWER_USERNAME}",
+      "email": "${SSO_VIEWER_USERNAME}@kind.local",
+      "emailVerified": true,
+      "firstName": "Platform",
+      "lastName": "Viewer",
+      "enabled": true,
+      "credentials": [
+        { "type": "password", "value": "${SSO_VIEWER_PASSWORD}", "temporary": false }
+      ],
+      "groups": ["/platform-viewers"],
+      "realmRoles": ["default-roles-platform"]
+    }
+  ]
+}

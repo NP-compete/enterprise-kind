@@ -1,0 +1,309 @@
+---
+# A single landing page for the whole platform: every console, its live health,
+# and cluster stats pulled from the Kubernetes API. Served at
+# https://home.${BASE_DOMAIN} behind the same Keycloak SSO as Prometheus.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: portal
+  labels:
+    platform.kind.local/component: portal
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: portal
+  namespace: portal
+---
+# Read-only, and only what the cluster/resource widgets actually need.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: portal
+rules:
+  - apiGroups: [""]
+    resources: [namespaces, pods, nodes, services]
+    verbs: [get, list]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [get, list]
+  - apiGroups: [metrics.k8s.io]
+    resources: [nodes, pods]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: portal
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: portal
+subjects:
+  - kind: ServiceAccount
+    name: portal
+    namespace: portal
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: portal-config
+  namespace: portal
+data:
+  kubernetes.yaml: |
+    mode: cluster
+
+  settings.yaml: |
+    title: ${CLUSTER_NAME} platform
+    description: Consoles, observability and identity for the kind cluster
+    theme: dark
+    color: slate
+    headerStyle: boxed
+    hideVersion: true
+    disableUpdateCheck: true
+    statusStyle: dot
+    layout:
+      Consoles:
+        style: row
+        columns: 3
+      Observability:
+        style: row
+        columns: 3
+      Identity:
+        style: row
+        columns: 2
+      Cluster:
+        style: row
+        columns: 2
+
+  widgets.yaml: |
+    - kubernetes:
+        cluster:
+          show: true
+          cpu: true
+          memory: true
+          showLabel: true
+          label: "${CLUSTER_NAME}"
+        nodes:
+          show: true
+          cpu: true
+          memory: true
+          showLabel: true
+    - search:
+        provider: duckduckgo
+        target: _blank
+    - datetime:
+        text_size: xl
+        format:
+          timeStyle: short
+          dateStyle: short
+
+  services.yaml: |
+    - Consoles:
+        - Headlamp:
+            href: https://headlamp.${BASE_DOMAIN}${URL_SUFFIX}
+            siteMonitor: https://headlamp.${BASE_DOMAIN}${URL_SUFFIX}
+            description: Manage every Kubernetes resource -- browse, edit, exec, logs
+            icon: kubernetes.png
+        - Argo CD:
+            href: https://argocd.${BASE_DOMAIN}${URL_SUFFIX}
+            siteMonitor: https://argocd.${BASE_DOMAIN}${URL_SUFFIX}
+            description: GitOps delivery and application health
+            icon: argo-cd.png
+        - Grafana:
+            href: https://grafana.${BASE_DOMAIN}${URL_SUFFIX}
+            siteMonitor: https://grafana.${BASE_DOMAIN}${URL_SUFFIX}
+            description: Dashboards over metrics, logs and traces
+            icon: grafana.png
+
+    - Observability:
+        - Prometheus:
+            href: https://prometheus.${BASE_DOMAIN}${URL_SUFFIX}
+            siteMonitor: https://prometheus.${BASE_DOMAIN}${URL_SUFFIX}
+            description: Metrics, scrape targets and alerting rules
+            icon: prometheus.png
+        - Alertmanager:
+            href: https://alertmanager.${BASE_DOMAIN}${URL_SUFFIX}
+            siteMonitor: https://alertmanager.${BASE_DOMAIN}${URL_SUFFIX}
+            description: Alert routing, grouping and silences
+            icon: alertmanager.png
+        - Platform Overview:
+            href: https://grafana.${BASE_DOMAIN}${URL_SUFFIX}/d/platform-overview
+            description: Capacity, ingress traffic, restarts and error logs
+            icon: grafana.png
+
+    - Identity:
+        - Vault:
+            href: https://vault.${BASE_DOMAIN}${URL_SUFFIX}
+            siteMonitor: https://vault.${BASE_DOMAIN}${URL_SUFFIX}/v1/sys/health?standbyok=true&sealedcode=200&uninitcode=200
+            description: Secret store of record -- root token in .secrets/vault-root-token
+            icon: vault.png
+        - Keycloak:
+            href: https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/admin
+            siteMonitor: https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/realms/platform/.well-known/openid-configuration
+            description: Realm, clients, groups and users -- the source of all logins
+            icon: keycloak.png
+
+    - Cluster:
+        - Network flows:
+            href: https://flows.${BASE_DOMAIN}${URL_SUFFIX}
+            siteMonitor: https://flows.${BASE_DOMAIN}${URL_SUFFIX}
+            description: Calico Whisker -- live pod-to-pod flows, allowed and denied
+            icon: mdi-lan-connect
+        - Registry:
+            href: https://registry.${BASE_DOMAIN}${URL_SUFFIX}
+            siteMonitor: https://registry.${BASE_DOMAIN}${URL_SUFFIX}
+            description: "Images (TLS+auth; prompts for registry login) -- push: make push IMG=app:tag"
+            icon: docker.png
+        - Loki:
+            description: Logs -- query from Grafana Explore
+            href: https://grafana.${BASE_DOMAIN}${URL_SUFFIX}/explore
+            icon: grafana.png
+
+  bookmarks.yaml: |
+    - Runbook:
+        - This platform:
+            - abbr: RM
+              href: https://github.com/kubernetes-sigs/kind
+    - Docs:
+        - Headlamp:
+            - abbr: HL
+              href: https://headlamp.dev/docs/latest/
+        - Argo CD:
+            - abbr: CD
+              href: https://argo-cd.readthedocs.io/
+        - Keycloak:
+            - abbr: KC
+              href: https://www.keycloak.org/documentation
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: portal
+  namespace: portal
+  labels:
+    app.kubernetes.io/name: portal
+    owner: platform-team
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: portal
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: portal
+      annotations:
+        platform.kind.local/config-checksum: "${PORTAL_CONFIG_CHECKSUM}"
+    spec:
+      serviceAccountName: portal
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      # Homepage writes skeleton files (docker.yaml, custom.css, ...) into
+      # /app/config at boot and refuses to start if it cannot. Mounting the
+      # ConfigMap entries with subPath leaves the directory itself read-only,
+      # so seed a writable emptyDir from the ConfigMap instead.
+      initContainers:
+        - name: seed-config
+          image: ghcr.io/gethomepage/homepage:v1.4.5
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "cp /config-src/*.yaml /app/config/ && mkdir -p /app/config/logs"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config-src
+              mountPath: /config-src
+              readOnly: true
+            - name: config
+              mountPath: /app/config
+      containers:
+        - name: homepage
+          image: ghcr.io/gethomepage/homepage:v1.4.5
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            # Homepage refuses requests whose Host header is not listed here.
+            - name: HOMEPAGE_ALLOWED_HOSTS
+              value: "home.${BASE_DOMAIN}${URL_SUFFIX},home.${BASE_DOMAIN}"
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+      volumes:
+        - name: config-src
+          configMap:
+            name: portal-config
+        - name: config
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: portal
+  namespace: portal
+  labels:
+    app.kubernetes.io/name: portal
+spec:
+  selector:
+    app.kubernetes.io/name: portal
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: portal
+  namespace: portal
+  annotations:
+    cert-manager.io/cluster-issuer: platform-ca
+    # Same Keycloak SSO as Prometheus and Alertmanager.
+    nginx.ingress.kubernetes.io/auth-url: http://oauth2-proxy.identity.svc.cluster.local/oauth2/auth
+    nginx.ingress.kubernetes.io/auth-signin: https://auth.${BASE_DOMAIN}${URL_SUFFIX}/oauth2/start?rd=$scheme://$best_http_host$escaped_request_uri
+    nginx.ingress.kubernetes.io/auth-response-headers: X-Auth-Request-User,X-Auth-Request-Email,X-Auth-Request-Groups
+spec:
+  ingressClassName: nginx
+  tls:
+    - secretName: portal-tls
+      hosts: ["home.${BASE_DOMAIN}"]
+  rules:
+    - host: home.${BASE_DOMAIN}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: portal
+                port:
+                  number: 80

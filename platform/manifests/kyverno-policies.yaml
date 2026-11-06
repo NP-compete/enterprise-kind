@@ -1,0 +1,205 @@
+---
+# Governance baseline. Everything is Audit by default so the cluster stays usable;
+# flip `validationFailureAction: Enforce` on a policy once your workloads comply.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-resource-requests
+  annotations:
+    policies.kyverno.io/title: Require CPU/memory requests
+    policies.kyverno.io/category: Resource Management
+    policies.kyverno.io/severity: medium
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-requests
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          # Kubernetes' own namespaces.
+          - resources:
+              namespaces: [kube-system, kube-public, kube-node-lease, local-path-storage]
+          # Every platform namespace carries this label, so new platform
+          # components are covered automatically instead of being added to a
+          # list someone has to remember to update.
+          - resources:
+              namespaceSelector:
+                matchExpressions:
+                  - key: platform.kind.local/component
+                    operator: Exists
+      validate:
+        message: "Every container must declare resources.requests.cpu and resources.requests.memory."
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  requests:
+                    cpu: "?*"
+                    memory: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-latest-tag
+  annotations:
+    policies.kyverno.io/title: Disallow :latest and untagged images
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/severity: high
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: require-explicit-tag
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          # Kubernetes' own namespaces.
+          - resources:
+              namespaces: [kube-system, kube-public, kube-node-lease, local-path-storage]
+          # Every platform namespace carries this label, so new platform
+          # components are covered automatically instead of being added to a
+          # list someone has to remember to update.
+          - resources:
+              namespaceSelector:
+                matchExpressions:
+                  - key: platform.kind.local/component
+                    operator: Exists
+      validate:
+        message: "Images must carry an explicit, non-:latest tag or a digest."
+        pattern:
+          spec:
+            containers:
+              - image: "!*:latest"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-ownership-labels
+  annotations:
+    policies.kyverno.io/title: Require ownership labels
+    policies.kyverno.io/category: Governance
+    policies.kyverno.io/severity: low
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: check-labels
+      match:
+        any:
+          - resources:
+              kinds: [Deployment, StatefulSet, DaemonSet, CronJob]
+      exclude:
+        any:
+          # Kubernetes' own namespaces.
+          - resources:
+              namespaces: [kube-system, kube-public, kube-node-lease, local-path-storage]
+          # Every platform namespace carries this label, so new platform
+          # components are covered automatically instead of being added to a
+          # list someone has to remember to update.
+          - resources:
+              namespaceSelector:
+                matchExpressions:
+                  - key: platform.kind.local/component
+                    operator: Exists
+      validate:
+        message: "Workloads must set app.kubernetes.io/name and owner labels."
+        pattern:
+          metadata:
+            labels:
+              app.kubernetes.io/name: "?*"
+              owner: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-probes
+  annotations:
+    policies.kyverno.io/title: Require readiness and liveness probes
+    policies.kyverno.io/category: Reliability
+    policies.kyverno.io/severity: medium
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: check-probes
+      match:
+        any:
+          - resources:
+              kinds: [Deployment, StatefulSet]
+      exclude:
+        any:
+          # Kubernetes' own namespaces.
+          - resources:
+              namespaces: [kube-system, kube-public, kube-node-lease, local-path-storage]
+          # Every platform namespace carries this label, so new platform
+          # components are covered automatically instead of being added to a
+          # list someone has to remember to update.
+          - resources:
+              namespaceSelector:
+                matchExpressions:
+                  - key: platform.kind.local/component
+                    operator: Exists
+      validate:
+        message: "Containers must define both readinessProbe and livenessProbe."
+        pattern:
+          spec:
+            template:
+              spec:
+                containers:
+                  - livenessProbe:
+                      periodSeconds: ">0"
+                    readinessProbe:
+                      periodSeconds: ">0"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: add-default-securitycontext
+  annotations:
+    policies.kyverno.io/title: Default hardened securityContext
+    policies.kyverno.io/category: Security
+spec:
+  rules:
+    - name: mutate-pod-security
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchLabels:
+                  platform.kind.local/managed: "true"
+      mutate:
+        patchStrategicMerge:
+          spec:
+            securityContext:
+              +(runAsNonRoot): true
+              +(seccompProfile):
+                type: RuntimeDefault
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-default-namespace
+  annotations:
+    policies.kyverno.io/title: Keep workloads out of the default namespace
+    policies.kyverno.io/category: Multi-Tenancy
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: no-workloads-in-default
+      match:
+        any:
+          - resources:
+              kinds: [Pod, Deployment, StatefulSet, DaemonSet]
+              namespaces: [default]
+      validate:
+        message: "Deploy into an owned namespace, not `default`."
+        deny: {}

@@ -1,0 +1,24 @@
+---
+crds:
+  enabled: true
+  keep: true
+replicaCount: 1
+enableCertificateOwnerRef: true
+dns01RecursiveNameserversOnly: false
+resources:
+  requests: { cpu: 20m, memory: 64Mi }
+  limits: { memory: 256Mi }
+webhook:
+  replicaCount: 1
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { memory: 128Mi }
+cainjector:
+  replicaCount: 1
+  resources:
+    requests: { cpu: 20m, memory: 128Mi }
+    limits: { memory: 512Mi }
+prometheus:
+  enabled: true
+  servicemonitor:
+    enabled: false # flipped on by the post-install pass once the CRDs exist

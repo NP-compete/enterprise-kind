@@ -1,0 +1,64 @@
+---
+admissionController:
+  replicas: 1
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 1Gi }
+  serviceMonitor:
+    enabled: false
+backgroundController:
+  replicas: 1
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 512Mi }
+  serviceMonitor:
+    enabled: false
+cleanupController:
+  replicas: 1
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { memory: 256Mi }
+  serviceMonitor:
+    enabled: false
+reportsController:
+  replicas: 1
+  resources:
+    requests: { cpu: 50m, memory: 192Mi }
+    limits: { memory: 1Gi }
+  serviceMonitor:
+    enabled: false
+
+config:
+  # Never let a policy webhook stand between you and the platform itself.
+  resourceFilters:
+    - "[Event,*,*]"
+    - "[*,kube-system,*]"
+    - "[*,kube-public,*]"
+    - "[*,kube-node-lease,*]"
+    - "[*,kyverno,*]"
+    - "[*,cert-manager,*]"
+    - "[*,local-path-storage,*]"
+    - "[Node,*,*]"
+    - "[APIService,*,*]"
+    - "[TokenReview,*,*]"
+    - "[SubjectAccessReview,*,*]"
+    - "[SelfSubjectAccessReview,*,*]"
+    - "[Binding,*,*]"
+    - "[ReplicaSet,*,*]"
+    - "[EphemeralReport,*,*]"
+    - "[ClusterEphemeralReport,*,*]"
+  webhooks:
+    - namespaceSelector:
+        matchExpressions:
+          - key: kubernetes.io/metadata.name
+            operator: NotIn
+            values: [kube-system, kyverno, cert-manager, local-path-storage]
+
+features:
+  backgroundScan:
+    enabled: true
+    backgroundScanWorkers: 2
+    # Default is 1h, which makes policy reports stale enough to be misleading
+    # on a cluster you are actively changing.
+    backgroundScanInterval: 5m
+    skipResourceFilters: true

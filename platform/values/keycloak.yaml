@@ -1,0 +1,130 @@
+---
+# Keycloak 26 as the cluster's identity provider. The `platform` realm is
+# imported declaratively from platform/manifests/keycloak-realm.json, so the
+# whole SSO configuration lives in git, not in a database someone clicked at.
+image:
+  repository: quay.io/keycloak/keycloak
+  tag: "26.8.1"
+
+replicas: 1
+
+# Satisfies the require-ownership-labels policy.
+statefulsetLabels:
+  owner: platform-team
+  app.kubernetes.io/name: keycloak
+
+# `--import-realm` only runs at startup, so a changed realm file must roll the
+# pod. Without this the realm silently stays on the previously imported version.
+podAnnotations:
+  platform.kind.local/realm-checksum: "${REALM_CHECKSUM}"
+
+command:
+  - /opt/keycloak/bin/kc.sh
+args:
+  - start
+  - --import-realm
+
+http:
+  relativePath: "/"
+
+proxy:
+  enabled: true
+  mode: forwarded
+  http:
+    enabled: true
+
+database:
+  vendor: postgres
+  hostname: keycloak-postgres.identity.svc.cluster.local
+  port: 5432
+  database: keycloak
+  username: keycloak
+  existingSecret: keycloak-db
+  existingSecretKey: password
+
+dbchecker:
+  enabled: true
+  # The chart's default omits capabilities, which PodSecurity flags as
+  # "unrestricted capabilities" under the restricted profile.
+  securityContext:
+    allowPrivilegeEscalation: false
+    runAsUser: 1000
+    runAsGroup: 1000
+    runAsNonRoot: true
+    capabilities:
+      drop: ["ALL"]
+
+extraEnv: |
+  - name: KC_HOSTNAME
+    value: https://keycloak.${BASE_DOMAIN}
+  - name: KC_HOSTNAME_STRICT
+    value: "false"
+  - name: KC_HOSTNAME_BACKCHANNEL_DYNAMIC
+    value: "true"
+  # KC_HTTP_ENABLED / KC_HEALTH_ENABLED / KC_METRICS_ENABLED are set by the
+  # chart from proxy.http.enabled / health.enabled / metrics.enabled -- setting
+  # them here too produces duplicate env entries and a failed apply.
+  - name: KC_LOG_LEVEL
+    value: info
+  - name: KC_BOOTSTRAP_ADMIN_USERNAME
+    valueFrom:
+      secretKeyRef:
+        name: keycloak-bootstrap-admin
+        key: username
+  - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: keycloak-bootstrap-admin
+        key: password
+  - name: JAVA_OPTS_APPEND
+    value: -XX:MaxRAMPercentage=70
+
+extraVolumes: |
+  - name: realm
+    secret:
+      secretName: keycloak-realm
+
+extraVolumeMounts: |
+  - name: realm
+    mountPath: /opt/keycloak/data/import
+    readOnly: true
+
+ingress:
+  enabled: true
+  ingressClassName: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: platform-ca
+    nginx.ingress.kubernetes.io/proxy-buffer-size: 128k
+  rules:
+    - host: keycloak.${BASE_DOMAIN}
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: keycloak-tls
+      hosts:
+        - keycloak.${BASE_DOMAIN}
+
+resources:
+  requests: { cpu: 200m, memory: 768Mi }
+  limits: { memory: 2Gi }
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+metrics:
+  enabled: true
+health:
+  enabled: true
+
+serviceMonitor:
+  enabled: false # flipped on by the post-install pass

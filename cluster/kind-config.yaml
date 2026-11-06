@@ -1,0 +1,165 @@
+---
+# Production-shaped kind cluster.
+#   - 3 control-plane nodes (real etcd quorum) behind kind's HAProxy
+#   - 3 workers spread over 3 synthetic zones
+#   - Secrets encrypted at rest in etcd
+#   - OIDC (Keycloak) configured at kubeadm time, not patched in afterwards
+#   - API audit logging, PodSecurity admission
+#   - default CNI disabled; Calico is installed by scripts/cluster-up.sh
+#
+# Rendered by scripts/cluster-up.sh (envsubst) -> .build/kind-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: ${CLUSTER_NAME}
+
+networking:
+  ipFamily: ipv4
+  apiServerAddress: "127.0.0.1"
+  apiServerPort: ${API_SERVER_PORT}
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/16"
+  # Calico does not replace kube-proxy.
+  kubeProxyMode: "iptables"
+  disableDefaultCNI: true
+
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
+
+kubeadmConfigPatches:
+  - |
+    kind: ClusterConfiguration
+    apiVersion: kubeadm.k8s.io/v1beta4
+    apiServer:
+      extraArgs:
+        - name: audit-policy-file
+          value: /etc/kubernetes/policies/audit-policy.yaml
+        - name: audit-log-path
+          value: /var/log/kubernetes/audit.log
+        - name: audit-log-maxage
+          value: "7"
+        - name: audit-log-maxbackup
+          value: "5"
+        - name: audit-log-maxsize
+          value: "100"
+        - name: admission-control-config-file
+          value: /etc/kubernetes/policies/admission-config.yaml
+        - name: encryption-provider-config
+          value: /etc/kubernetes/policies/encryption-config.yaml
+        - name: encryption-provider-config-automatic-reload
+          value: "true"
+        - name: authentication-config
+          value: /etc/kubernetes/policies/authentication-config.yaml
+        - name: enable-admission-plugins
+          value: NodeRestriction,PodSecurity,ResourceQuota,LimitRanger,ServiceAccount,DefaultStorageClass,PersistentVolumeClaimResize,DefaultIngressClass
+        - name: request-timeout
+          value: "300s"
+      extraVolumes:
+        - name: policies
+          hostPath: /etc/kubernetes/policies
+          mountPath: /etc/kubernetes/policies
+          readOnly: true
+          pathType: DirectoryOrCreate
+        - name: audit-log
+          hostPath: /var/log/kubernetes
+          mountPath: /var/log/kubernetes
+          readOnly: false
+          pathType: DirectoryOrCreate
+    etcd:
+      local:
+        extraArgs:
+          - name: listen-metrics-urls
+            value: http://0.0.0.0:2381
+    controllerManager:
+      extraArgs:
+        - name: bind-address
+          value: 0.0.0.0
+    scheduler:
+      extraArgs:
+        - name: bind-address
+          value: 0.0.0.0
+  - |
+    kind: KubeProxyConfiguration
+    apiVersion: kubeproxy.config.k8s.io/v1alpha1
+    # Default binds to 127.0.0.1, which Prometheus cannot reach.
+    metricsBindAddress: 0.0.0.0:10249
+
+nodes:
+  # ---- control plane (etcd quorum of 3) ----
+  - role: control-plane
+    image: ${NODE_IMAGE}
+    extraMounts: &cp_mounts
+      - hostPath: ${POLICY_DIR}
+        containerPath: /etc/kubernetes/policies
+        readOnly: true
+    kubeadmConfigPatches: &cp_labels
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            - name: node-labels
+              value: "topology.kubernetes.io/region=kind-local,topology.kubernetes.io/zone=zone-a,workload=control-plane"
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            - name: node-labels
+              value: "topology.kubernetes.io/region=kind-local,topology.kubernetes.io/zone=zone-a,workload=control-plane"
+  - role: control-plane
+    image: ${NODE_IMAGE}
+    extraMounts: *cp_mounts
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            - name: node-labels
+              value: "topology.kubernetes.io/region=kind-local,topology.kubernetes.io/zone=zone-b,workload=control-plane"
+  - role: control-plane
+    image: ${NODE_IMAGE}
+    extraMounts: *cp_mounts
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            - name: node-labels
+              value: "topology.kubernetes.io/region=kind-local,topology.kubernetes.io/zone=zone-c,workload=control-plane"
+
+  # ---- workers ----
+  # Worker A also fronts ingress and publishes 80/443 to the host.
+  - role: worker
+    image: ${NODE_IMAGE}
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            - name: node-labels
+              value: "ingress-ready=true,topology.kubernetes.io/region=kind-local,topology.kubernetes.io/zone=zone-a,workload=general"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: ${HTTP_PORT}
+        protocol: TCP
+      - containerPort: 443
+        hostPort: ${HTTPS_PORT}
+        protocol: TCP
+  - role: worker
+    image: ${NODE_IMAGE}
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            - name: node-labels
+              value: "topology.kubernetes.io/region=kind-local,topology.kubernetes.io/zone=zone-b,workload=general"
+  - role: worker
+    image: ${NODE_IMAGE}
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            - name: node-labels
+              value: "topology.kubernetes.io/region=kind-local,topology.kubernetes.io/zone=zone-c,workload=general"

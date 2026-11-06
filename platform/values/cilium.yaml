@@ -1,0 +1,93 @@
+---
+# Cilium replaces both kindnet and kube-proxy. The reason it is here rather
+# than kindnet: kindnet does not enforce NetworkPolicy, so the default-deny
+# rules in the tenant namespace template were decorative. With Cilium they are
+# real, and Hubble shows you exactly what is being allowed or dropped.
+kubeProxyReplacement: true
+k8sServiceHost: "${CILIUM_API_HOST}"
+k8sServicePort: "${CILIUM_API_PORT}"
+
+# kind nodes share the host kernel; this is the combination that works there.
+ipam:
+  mode: kubernetes
+routingMode: tunnel
+tunnelProtocol: vxlan
+
+operator:
+  replicas: 2
+  rollOutPods: true
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 512Mi }
+  prometheus:
+    enabled: true
+    serviceMonitor:
+      enabled: false # flipped on after the Prometheus CRDs exist
+
+rollOutCiliumPods: true
+
+resources:
+  requests: { cpu: 100m, memory: 256Mi }
+  limits: { memory: 1Gi }
+
+# Observability: flow visibility plus a UI, wired into the platform ingress.
+hubble:
+  enabled: true
+  metrics:
+    enabled:
+      - dns:query
+      - drop
+      - tcp
+      - flow
+      - port-distribution
+      - icmp
+      - httpV2:exemplars=true;labelsContext=source_ip\,source_namespace\,source_workload\,destination_ip\,destination_namespace\,destination_workload\,traffic_direction
+    serviceMonitor:
+      enabled: false
+  relay:
+    enabled: true
+    rollOutPods: true
+    resources:
+      requests: { cpu: 20m, memory: 64Mi }
+      limits: { memory: 256Mi }
+  ui:
+    enabled: true
+    rollOutPods: true
+    frontend:
+      resources:
+        requests: { cpu: 20m, memory: 64Mi }
+        limits: { memory: 256Mi }
+    backend:
+      resources:
+        requests: { cpu: 20m, memory: 64Mi }
+        limits: { memory: 256Mi }
+    ingress:
+      enabled: true
+      className: nginx
+      annotations:
+        cert-manager.io/cluster-issuer: platform-ca
+        nginx.ingress.kubernetes.io/auth-url: http://oauth2-proxy.identity.svc.cluster.local/oauth2/auth
+        nginx.ingress.kubernetes.io/auth-signin: https://auth.${BASE_DOMAIN}${URL_SUFFIX}/oauth2/start?rd=$scheme://$best_http_host$escaped_request_uri
+        nginx.ingress.kubernetes.io/auth-response-headers: X-Auth-Request-User,X-Auth-Request-Email,X-Auth-Request-Groups
+      hosts:
+        - hubble.${BASE_DOMAIN}
+      tls:
+        - secretName: hubble-ui-tls
+          hosts: ["hubble.${BASE_DOMAIN}"]
+
+prometheus:
+  enabled: true
+  serviceMonitor:
+    enabled: false
+
+# Drop-in replacement for kube-proxy also means Cilium owns NodePort/hostPort.
+nodePort:
+  enabled: true
+socketLB:
+  hostNamespaceOnly: true
+
+# Audit-friendly: log policy decisions so Hubble can show denies.
+policyEnforcementMode: default
+
+envoy:
+  enabled: false

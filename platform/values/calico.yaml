@@ -1,0 +1,38 @@
+---
+# Calico provides the CNI *and* real NetworkPolicy enforcement.
+#
+# Why not Cilium: its datapath needs a BPF filesystem, and rootless podman
+# cannot mount one ("mount: /sys/fs/bpf: permission denied"). Calico's iptables
+# dataplane has no such requirement, and policy enforcement -- the actual goal
+# -- is equivalent.
+installation:
+  enabled: true
+  cni:
+    type: Calico
+    ipam:
+      type: Calico
+  calicoNetwork:
+    # VXLAN works without BGP peering, which is what we want inside kind.
+    bgp: Disabled
+    ipPools:
+      - name: default-ipv4-pool
+        cidr: 10.244.0.0/16
+        encapsulation: VXLANCrossSubnet
+        natOutgoing: Enabled
+        nodeSelector: all()
+  controlPlaneTolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: node.kubernetes.io/not-ready
+      operator: Exists
+      effect: NoSchedule
+
+# Keep the operator's own footprint small; this is a laptop.
+tigeraOperator:
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 512Mi }
+
+apiServer:
+  enabled: false

@@ -1,0 +1,90 @@
+---
+# Cluster backup and restore, stored in the local object store.
+#
+# This is what turns "make clean && make all" from the recovery plan into an
+# actual restore path: namespaces, resources and PVC contents can be recovered
+# without rebuilding from scratch.
+image:
+  repository: velero/velero
+
+initContainers:
+  - name: velero-plugin-for-aws
+    image: velero/velero-plugin-for-aws:v1.13.0
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+
+credentials:
+  useSecret: true
+  # Created by scripts/platform-install.sh in the AWS credentials-file format
+  # Velero expects (key "cloud"), not the flat env-var form other charts use.
+  existingSecret: velero-object-store
+
+configuration:
+  backupStorageLocation:
+    - name: default
+      provider: aws
+      bucket: velero
+      default: true
+      credential:
+        name: velero-object-store
+        key: cloud
+      config:
+        region: us-east-1
+        s3ForcePathStyle: "true"
+        s3Url: http://s3.storage.svc.cluster.local:8333
+        checksumAlgorithm: ""
+  # No CSI snapshotter on kind, so PVC contents are backed up file-by-file.
+  volumeSnapshotLocation: []
+  defaultVolumesToFsBackup: true
+  uploaderType: kopia
+
+# node-agent performs the filesystem backups of PVC data.
+deployNodeAgent: true
+nodeAgent:
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 1Gi }
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+
+resources:
+  requests: { cpu: 50m, memory: 128Mi }
+  limits: { memory: 512Mi }
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: false # flipped on by the post-install pass
+
+schedules:
+  daily:
+    disabled: false
+    schedule: "0 2 * * *"
+    useOwnerReferencesInBackup: false
+    template:
+      ttl: "168h"
+      storageLocation: default
+      includedNamespaces: ["*"]
+      excludedNamespaces:
+        # Recreated by the platform install; backing them up is noise.
+        - kube-system
+        - kube-public
+        - kube-node-lease
+        - calico-system
+        - tigera-operator
+      snapshotVolumes: false
+  hourly-platform:
+    disabled: false
+    schedule: "30 * * * *"
+    template:
+      ttl: "48h"
+      storageLocation: default
+      includedNamespaces:
+        - identity
+        - argocd
+        - apps
+      snapshotVolumes: false

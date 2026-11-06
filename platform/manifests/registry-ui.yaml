@@ -1,0 +1,185 @@
+---
+# Web UI for the local image registry: browse repositories and tags, inspect
+# layers and manifests, delete images. Served at https://registry.${BASE_DOMAIN}
+# behind the same Keycloak SSO as the other consoles.
+#
+# The registry itself is a podman container on the kind network, not a pod, so
+# a Service with hand-maintained EndpointSlice points at it. Its address is
+# refreshed on every `make install` (see scripts/registry.sh endpoint).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: registry
+  labels:
+    platform.kind.local/component: registry
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry-backend
+  namespace: registry
+  labels:
+    app.kubernetes.io/name: registry-backend
+spec:
+  # No selector: the endpoints below are managed by scripts/registry.sh.
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000
+      protocol: TCP
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: registry-backend
+  namespace: registry
+  labels:
+    kubernetes.io/service-name: registry-backend
+addressType: IPv4
+ports:
+  - name: http
+    port: 5000
+    protocol: TCP
+endpoints:
+  - addresses:
+      - "${REGISTRY_CONTAINER_IP}"
+    conditions:
+      ready: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry-ui
+  namespace: registry
+  labels:
+    app.kubernetes.io/name: registry-ui
+    owner: platform-team
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: registry-ui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: registry-ui
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      # The registry now serves TLS from the platform CA, so the UI's nginx
+      # has to trust it. Same approach as Headlamp: rebuild the trust store in
+      # an emptyDir rather than replacing the image's CA bundle wholesale.
+      initContainers:
+        - name: ca-bundle
+          image: docker.io/joxit/docker-registry-ui:2.6.0
+          command: ["sh","-c","cp -aL /etc/ssl/certs/. /work/ && cat /platform-ca/ca.crt >> /work/ca-certificates.crt"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 101
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: ca-bundle, mountPath: /work }
+            - { name: platform-ca, mountPath: /platform-ca, readOnly: true }
+      volumes:
+        - name: ca-bundle
+          emptyDir: {}
+        - name: platform-ca
+          configMap:
+            name: platform-ca
+      containers:
+        - name: ui
+          image: docker.io/joxit/docker-registry-ui:2.6.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # Proxying through the UI's own nginx avoids having to enable CORS
+            # on the registry.
+            - name: NGINX_PROXY_PASS_URL
+              value: https://registry-backend.registry.svc.cluster.local:5000
+            - name: NGINX_LISTEN_PORT
+              value: "8080"
+            - name: REGISTRY_TITLE
+              value: "${CLUSTER_NAME} registry"
+            - name: SINGLE_REGISTRY
+              value: "true"
+            - name: DELETE_IMAGES
+              value: "true"
+            - name: SHOW_CONTENT_DIGEST
+              value: "true"
+            - name: SHOW_CATALOG_NB_TAGS
+              value: "true"
+            - name: CATALOG_ELEMENTS_LIMIT
+              value: "100"
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 20m, memory: 48Mi }
+            limits: { memory: 192Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: ca-bundle, mountPath: /etc/ssl/certs, readOnly: true }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry-ui
+  namespace: registry
+  labels:
+    app.kubernetes.io/name: registry-ui
+spec:
+  selector:
+    app.kubernetes.io/name: registry-ui
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: registry-ui
+  namespace: registry
+  annotations:
+    cert-manager.io/cluster-issuer: platform-ca
+    nginx.ingress.kubernetes.io/auth-url: http://oauth2-proxy.identity.svc.cluster.local/oauth2/auth
+    nginx.ingress.kubernetes.io/auth-signin: https://auth.${BASE_DOMAIN}${URL_SUFFIX}/oauth2/start?rd=$scheme://$best_http_host$escaped_request_uri
+    nginx.ingress.kubernetes.io/auth-response-headers: X-Auth-Request-User,X-Auth-Request-Email,X-Auth-Request-Groups
+    # Image layers are large; do not let nginx cap the upload/download body.
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+spec:
+  ingressClassName: nginx
+  tls:
+    - secretName: registry-ui-tls
+      hosts: ["registry.${BASE_DOMAIN}"]
+  rules:
+    - host: registry.${BASE_DOMAIN}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: registry-ui
+                port:
+                  number: 80

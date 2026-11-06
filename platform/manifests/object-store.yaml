@@ -1,0 +1,199 @@
+---
+# S3-compatible object storage for Loki, Tempo, Velero and Postgres backups.
+#
+# Why SeaweedFS and not MinIO: MinIO's container images are no longer publicly
+# pullable from either quay.io or Docker Hub ("unauthorized: access to the
+# requested resource is not authorized"). SeaweedFS is Apache-2.0, pulls
+# anonymously, and speaks the same S3 API these components need.
+#
+# Single replica on a local-path PVC. That is honest for one host: it removes
+# the "logs and backups live on the same node as the workload" problem, but it
+# is not itself replicated.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: storage
+  labels:
+    platform.kind.local/component: object-store
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: s3
+  namespace: storage
+  labels:
+    app.kubernetes.io/name: object-store
+spec:
+  selector:
+    app.kubernetes.io/name: object-store
+  ports:
+    - name: s3
+      port: 8333
+      targetPort: s3
+    - name: master
+      port: 9333
+      targetPort: master
+    - name: filer
+      port: 8888
+      targetPort: filer
+    # weed shell speaks gRPC, which SeaweedFS serves on the HTTP port + 10000.
+    # Without these the shell connects and then blocks forever.
+    - name: master-grpc
+      port: 19333
+      targetPort: master-grpc
+    - name: filer-grpc
+      port: 18888
+      targetPort: filer-grpc
+    - name: metrics
+      port: 9327
+      targetPort: metrics
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: object-store
+  namespace: storage
+  labels:
+    app.kubernetes.io/name: object-store
+    owner: platform-team
+spec:
+  serviceName: s3
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: object-store
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: object-store
+      annotations:
+        platform.kind.local/s3-config-checksum: "${S3_CONFIG_CHECKSUM}"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: seaweedfs
+          image: docker.io/chrislusf/seaweedfs:3.80
+          imagePullPolicy: IfNotPresent
+          args:
+            - server
+            - -dir=/data
+            - -master.volumeSizeLimitMB=1024
+            - -volume.max=0
+            - -metricsPort=9327
+            - -s3
+            - -s3.port=8333
+            - -s3.config=/etc/seaweedfs/s3.json
+            - -filer
+            # Advertise the pod IP, not localhost: the master hands this
+            # address back to clients, and "localhost" sends them to themselves.
+            - -ip=$(POD_IP)
+            - -ip.bind=0.0.0.0
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          ports:
+            - { name: s3, containerPort: 8333 }
+            - { name: master, containerPort: 9333 }
+            - { name: volume, containerPort: 8080 }
+            - { name: filer, containerPort: 8888 }
+            - { name: master-grpc, containerPort: 19333 }
+            - { name: filer-grpc, containerPort: 18888 }
+            - { name: metrics, containerPort: 9327 }
+          readinessProbe:
+            httpGet: { path: /status, port: s3 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 10
+          livenessProbe:
+            httpGet: { path: /status, port: s3 }
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: s3config, mountPath: /etc/seaweedfs, readOnly: true }
+      volumes:
+        - name: s3config
+          secret:
+            secretName: object-store-s3-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: standard
+        resources:
+          requests:
+            storage: 30Gi
+---
+# Buckets are created once the S3 endpoint answers. Idempotent: re-running the
+# job against existing buckets is a no-op.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-buckets
+  namespace: storage
+  labels:
+    app.kubernetes.io/name: create-buckets
+    owner: platform-team
+  annotations:
+    platform.kind.local/s3-config-checksum: "${S3_CONFIG_CHECKSUM}"
+spec:
+  backoffLimit: 20
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: create-buckets
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: weed
+          image: docker.io/chrislusf/seaweedfs:3.80
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              until wget -qO- http://s3.storage.svc.cluster.local:8333/status >/dev/null 2>&1; do
+                echo "waiting for the S3 endpoint..."; sleep 5
+              done
+              # weed shell needs BOTH master and filer; given only -master it
+              # connects and then blocks forever waiting on input.
+              SHELL_ARGS="-master=s3.storage.svc.cluster.local:9333 -filer=s3.storage.svc.cluster.local:8888"
+              printf 's3.bucket.create -name loki\ns3.bucket.create -name tempo\ns3.bucket.create -name velero\ns3.bucket.create -name postgres\ns3.bucket.create -name etcd\n' \
+                | weed shell ${SHELL_ARGS}
+              echo "--- buckets ---"
+              echo "s3.bucket.list" | weed shell ${SHELL_ARGS}
+          resources:
+            requests: { cpu: 20m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]

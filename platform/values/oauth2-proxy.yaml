@@ -1,0 +1,74 @@
+---
+# Auth gateway for the consoles that have no login of their own (Prometheus,
+# Alertmanager). ingress-nginx calls its /oauth2/auth subrequest; unauthenticated
+# users get bounced to Keycloak and back.
+replicaCount: 1
+
+# Satisfies the require-ownership-labels policy.
+deploymentLabels:
+  owner: platform-team
+
+config:
+  clientID: oauth2-proxy
+  clientSecret: "${OIDC_SECRET_OAUTH2PROXY}"
+  cookieSecret: "${OAUTH2_PROXY_COOKIE_SECRET}"
+  configFile: |-
+    provider = "oidc"
+    oidc_issuer_url = "https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/realms/platform"
+    provider_ca_files = ["/etc/platform-ca/ca.crt"]
+    redirect_url = "https://auth.${BASE_DOMAIN}${URL_SUFFIX}/oauth2/callback"
+    scope = "openid email profile groups"
+    email_domains = ["*"]
+    cookie_domains = [".${BASE_DOMAIN}"]
+    whitelist_domains = [".${BASE_DOMAIN}"]
+    cookie_secure = true
+    cookie_samesite = "lax"
+    cookie_expire = "8h"
+    set_xauthrequest = true
+    set_authorization_header = true
+    pass_access_token = true
+    pass_authorization_header = true
+    reverse_proxy = true
+    skip_provider_button = true
+    silence_ping_logging = true
+    # Only platform groups may reach the protected consoles.
+    allowed_groups = ["platform-admins", "platform-viewers"]
+
+extraVolumes:
+  - name: platform-ca
+    configMap:
+      name: platform-ca
+extraVolumeMounts:
+  - name: platform-ca
+    mountPath: /etc/platform-ca
+    readOnly: true
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: platform-ca
+  hosts:
+    - auth.${BASE_DOMAIN}
+  path: /oauth2
+  pathType: Prefix
+  tls:
+    - secretName: oauth2-proxy-tls
+      hosts: ["auth.${BASE_DOMAIN}"]
+
+resources:
+  requests: { cpu: 20m, memory: 64Mi }
+  limits: { memory: 256Mi }
+
+securityContext:
+  enabled: true
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: false # flipped on by the post-install pass

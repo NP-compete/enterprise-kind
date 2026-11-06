@@ -1,0 +1,81 @@
+---
+# Eviction order when the node is under pressure. Without these every pod is
+# priority 0 and the kubelet evicts essentially at random -- which on this
+# cluster meant the OOM killer taking out control-plane components alongside
+# demo workloads.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: platform-critical
+value: 1000000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: >-
+  Cluster would stop functioning without these: CNI, DNS, ingress, identity,
+  storage. Evicted last.
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: platform-high
+value: 100000
+globalDefault: false
+description: >-
+  Platform services that can briefly disappear without breaking the cluster:
+  observability, policy, GitOps, consoles.
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: tenant-default
+value: 1000
+globalDefault: false
+description: >-
+  Application workloads. Evicted before any platform component.
+---
+# Platform components that have no PodDisruptionBudget of their own. These stop
+# `kubectl drain` and node maintenance from taking the last replica away.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ingress-nginx
+  namespace: ingress-nginx
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ingress-nginx
+      app.kubernetes.io/component: controller
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: keycloak
+  namespace: identity
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: keycloak
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: oauth2-proxy
+  namespace: identity
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oauth2-proxy
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: object-store
+  namespace: storage
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: object-store

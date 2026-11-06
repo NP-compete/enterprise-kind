@@ -1,0 +1,60 @@
+---
+controller:
+  # DaemonSet pinned to the node that publishes 80/443 to the host.
+  kind: DaemonSet
+  hostPort:
+    enabled: true
+    ports:
+      http: 80
+      https: 443
+  service:
+    type: ClusterIP
+  nodeSelector:
+    ingress-ready: "true"
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Equal
+      effect: NoSchedule
+  watchIngressWithoutClass: true
+  ingressClassResource:
+    name: nginx
+    default: true
+  allowSnippetAnnotations: false
+  config:
+    # Production-ish hardening and observability defaults.
+    use-forwarded-headers: "true"
+    enable-real-ip: "true"
+    proxy-body-size: "32m"
+    proxy-buffer-size: "16k"
+    server-tokens: "false"
+    ssl-protocols: "TLSv1.2 TLSv1.3"
+    ssl-redirect: "true"
+    hsts: "true"
+    hsts-max-age: "31536000"
+    client-body-timeout: "30"
+    keep-alive: "75"
+    enable-brotli: "true"
+    log-format-escape-json: "true"
+    log-format-upstream: >-
+      {"time":"$time_iso8601","remote_addr":"$remote_addr","method":"$request_method",
+      "host":"$host","uri":"$uri","status":$status,"bytes":$body_bytes_sent,
+      "request_time":$request_time,"upstream":"$upstream_addr",
+      "upstream_status":"$upstream_status","upstream_time":"$upstream_response_time",
+      "namespace":"$namespace","ingress":"$ingress_name","service":"$service_name",
+      "user_agent":"$http_user_agent","request_id":"$req_id"}
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: false # flipped on after kube-prometheus-stack installs the CRDs
+  resources:
+    requests: { cpu: 100m, memory: 192Mi }
+    limits: { memory: 768Mi }
+  admissionWebhooks:
+    enabled: true
+    patch:
+      enabled: true
+defaultBackend:
+  enabled: true
+  resources:
+    requests: { cpu: 10m, memory: 24Mi }
+    limits: { memory: 64Mi }

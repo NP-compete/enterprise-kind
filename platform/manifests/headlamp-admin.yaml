@@ -1,0 +1,43 @@
+---
+# Dedicated login identities for the Headlamp console, separate from the
+# ServiceAccount the pod runs as (the chart owns `headlamp` / `headlamp-admin` --
+# do not reuse those names here or helm upgrades will conflict).
+# `make token` mints a short-lived token for one of these accounts.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: headlamp-login-admin
+  namespace: headlamp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: headlamp-login-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: headlamp-login-admin
+    namespace: headlamp
+---
+# A read-only identity to hand to anyone who should look but not touch.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: headlamp-login-viewer
+  namespace: headlamp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: headlamp-login-viewer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: headlamp-login-viewer
+    namespace: headlamp
