@@ -14,7 +14,7 @@ Everything is in this folder. `make clean && make all` rebuilds it from nothing.
 make all             # everything: cluster, platform, host wiring, verification
 make doctor          # something broken? names the problem and prints the fix
 make urls            # consoles and credentials
-make smoke           # 74 end-to-end checks
+make smoke           # 80 end-to-end checks
 make clean           # delete the cluster, keep .secrets/
 make reset           # delete everything including .secrets/
 ```
@@ -50,7 +50,7 @@ admin everywhere, `platform-viewers` read-only.
 
 ## What makes it production-shaped
 
-**It runs in 7.4 GiB, measured.** An earlier revision was fully HA — 3
+**It runs in 9.7 GiB, measured.** An earlier revision was fully HA — 3
 control planes, 3 workers, two or three replicas of everything — and took
 22 GiB across 162 pods. This one is 61 pods. Both numbers are the sum of
 `kubectl top nodes`, taken on an idle cluster after `make smoke`.
@@ -62,7 +62,8 @@ control planes, 3 workers, two or three replicas of everything — and took
 | Keycloak | 1.2 GiB (×2) | 0.4 GiB (×1, 384 MiB heap) |
 | Loki | 1.0 GiB (SimpleScalable, 7 pods) | 0.3 GiB (SingleBinary) |
 | MetalLB | 0.65 GiB (14 pods) | removed |
-| **total pod RSS** | **18.8 GiB** | **6.1 GiB** |
+| **total pod RSS** | **18.8 GiB** | **7.5 GiB** |
+| **cluster total** | **~22 GiB** | **9.7 GiB** |
 
 The apiserver was 31% of all pod memory and nothing in the config hints at
 it: each instance keeps a watch cache over every object and every CRD, and
@@ -148,6 +149,35 @@ Platform namespaces are labelled `platform.kind.local/component`. That label
 drives policy exclusions and CA distribution — remove it from a namespace and
 that namespace starts being policed as a tenant.
 
+## Sandboxed agents (OpenShell)
+
+NVIDIA [OpenShell](https://docs.nvidia.com/openshell/kubernetes/setup) runs
+agent workloads in sandboxes with a brokered network boundary: each sandbox
+is a supervisor pod plus a workload pod, and the workload's egress rides
+back over the supervisor's session where policy decides what is allowed out.
+
+```bash
+make openshell    # fetch the client mTLS bundle, register the CLI, port-forward
+```
+
+It is installed by `make install` along with the
+[Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox) controller
+it depends on, and costs about 34 MiB.
+
+Three things worth knowing:
+
+- **The isolation is only real because Calico enforces NetworkPolicy.**
+  Kubernetes accepts NetworkPolicy objects whether or not the CNI implements
+  them, so on a cluster running kindnet the sandbox boundary would be
+  decorative. `make smoke` proves enforcement with a pod-to-pod test.
+- **Sandboxes are policed like tenants.** They run in `openshell-sandboxes`,
+  which deliberately does *not* carry the platform exemption label every
+  other platform namespace has — Kyverno applies to them in full. A smoke
+  check asserts that label stays absent.
+- **No ingress.** The gateway requires client certificates and an ingress
+  proxy cannot present one, so access is via port-forward. Exposing it
+  properly means `server.tls.enableMtls=false` plus OIDC against Keycloak.
+
 ## Known limits
 
 These are real and mostly not fixable on one machine.
@@ -163,8 +193,11 @@ These are real and mostly not fixable on one machine.
   encryption key and every password. Copy it somewhere encrypted — see
   `docs/disaster-recovery.md`.
 - **Memory is still the binding constraint**, just a smaller one. Budget
-  **≥4 CPU and ≥10 GiB** for the podman VM; preflight checks and warns.
-  Measured steady state is 7.4 GiB, so 10 GiB leaves useful headroom.
+  **≥4 CPU and ≥12 GiB** for the podman VM; preflight checks and warns.
+  Measured steady state is 9.7 GiB. It was 7.4 GiB before every
+  ServiceMonitor was enabled at first install — more scrape targets cost
+  about 1.4 GiB across Prometheus, Grafana and Alloy. Turning monitoring
+  off for components you do not care about is the cheapest way back down.
   Note that kind nodes do not partition the VM — each advertises the whole
   machine as allocatable, so the scheduler will never refuse a pod and the
   failure mode is the OOM killer, not `Pending`.
@@ -195,6 +228,6 @@ These are real and mostly not fixable on one machine.
 
 macOS with podman (or Docker via `CONTAINER_ENGINE=docker`), kind, kubectl,
 helm, jq, openssl, envsubst. `make lint` additionally wants kubeconform and
-shellcheck. The podman VM wants ≥4 CPU and ≥10 GiB; preflight
+shellcheck. The podman VM wants ≥4 CPU and ≥12 GiB; preflight
 checks and warns. It also sets two sysctls *inside the VM* — unprivileged port
 binding and kernel keyring limits — both needed for kind under rootless podman.

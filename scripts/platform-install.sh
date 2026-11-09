@@ -441,6 +441,42 @@ fi
 # nothing in this cluster uses. Both are reinstated by uncommenting their
 # blocks in git history if the footprint budget ever grows.
 
+# ---------------------------------------------------------------- openshell
+# Agent Sandbox (kubernetes-sigs) provides the Sandbox CRD and controller
+# that OpenShell drives; it has to exist before the chart installs.
+step "agent-sandbox ${AGENT_SANDBOX_VERSION}"
+# The namespace must exist AND carry the platform exemption label before the
+# bundle is applied: the upstream controller Deployment declares no resource
+# requests, so require-resource-requests rejects it at admission otherwise.
+# Server-side apply preserves labels owned by a different field manager, so
+# the bundle's own Namespace object will not strip this.
+kc get namespace agent-sandbox-system >/dev/null 2>&1 \
+  || kc create namespace agent-sandbox-system >/dev/null
+kc label namespace agent-sandbox-system \
+  platform.kind.local/component=sandboxing --overwrite >/dev/null
+kc apply --server-side --force-conflicts -f \
+  "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AGENT_SANDBOX_VERSION}/sandbox.yaml" >/dev/null
+kc wait --for=condition=Established crd/sandboxes.agents.x-k8s.io --timeout=90s >/dev/null
+# Deployment name is not stable across releases; wait on whatever it shipped.
+kc -n agent-sandbox-system wait --for=condition=Available deployment --all --timeout=180s >/dev/null \
+  || warn "agent-sandbox controller did not report Available"
+ok "agent-sandbox ready"
+
+for ns in openshell openshell-sandboxes; do
+  kc get namespace "${ns}" >/dev/null 2>&1 || kc create namespace "${ns}" >/dev/null
+done
+# The gateway is platform infrastructure, so it is excluded from tenant
+# policy like every other platform namespace. The sandbox namespace is NOT:
+# sandboxes are untrusted workloads and must be policed like tenants.
+kc label namespace openshell platform.kind.local/component=sandboxing --overwrite >/dev/null
+kc label namespace openshell-sandboxes \
+  pod-security.kubernetes.io/enforce=baseline \
+  pod-security.kubernetes.io/warn=restricted --overwrite >/dev/null
+
+helm_install openshell openshell oci://ghcr.io/nvidia/openshell/helm-chart \
+  "${CHART_OPENSHELL}" "$(render "${V}/openshell.yaml")"
+ok "openshell gateway ready (make openshell)"
+
 kc apply -f "${M}/platform-quotas.yaml" >/dev/null
 kc apply -f "${M}/tenant-namespace.yaml" >/dev/null
 # Pulling from the registry now needs credentials (containerd ignores auth in

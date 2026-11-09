@@ -13,11 +13,10 @@ for t in kind kubectl helm "${CE}" envsubst; do need "$t"; done
 if [[ "${CE}" == "podman" ]]; then
   cpus=$(podman machine inspect --format '{{.Resources.CPUs}}' 2>/dev/null | head -1 || echo 0)
   mem=$(podman machine inspect --format '{{.Resources.Memory}}'  2>/dev/null | head -1 || echo 0)
-  # Measured: the whole platform sits near 8 GiB on a 1+1 node cluster.
-  # 10 GiB leaves room for workloads and for the page cache the kubelet and
-  # containerd actually want.
+  # Measured: 9.7 GiB steady state on a 1+1 node cluster. 12 GiB leaves room
+  # for workloads and the page cache kubelet and containerd want.
   [[ "${cpus:-0}" -ge 4     ]] || warn "podman machine has ${cpus} CPUs; >=4 recommended"
-  [[ "${mem:-0}"  -ge 10240 ]] || warn "podman machine has ${mem}MiB RAM; >=10240 recommended"
+  [[ "${mem:-0}"  -ge 12288 ]] || warn "podman machine has ${mem}MiB RAM; >=12288 recommended"
   ok "podman machine: ${cpus} cpu / ${mem} MiB"
 
   # Rootless podman cannot publish ports < 1024 unless the VM kernel allows it.

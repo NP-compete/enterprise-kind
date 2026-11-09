@@ -63,23 +63,25 @@ render_all() {
   for f in "${M}"/*.yaml; do envsubst "${PLATFORM_SUBST}" < "${f}" > "${LINT_DIR}/manifests/$(basename "${f}")"; done
 }
 
-# release:namespace:repo/chart:version-variable:values-file
+# release|namespace|repo/chart|version-variable|values-file
+# Pipe-delimited, not colon: OCI refs (oci://...) contain colons.
 CHARTS=(
-  "cert-manager:cert-manager:jetstack/cert-manager:CHART_CERT_MANAGER:cert-manager.yaml"
-  "ingress-nginx:ingress-nginx:ingress-nginx/ingress-nginx:CHART_INGRESS_NGINX:ingress-nginx.yaml"
-  "metrics-server:kube-system:metrics-server/metrics-server:CHART_METRICS_SERVER:metrics-server.yaml"
-  "cnpg:cnpg-system:cnpg/cloudnative-pg:CHART_CNPG:cnpg.yaml"
-  "keycloak:identity:codecentric/keycloakx:CHART_KEYCLOAK:keycloak.yaml"
-  "oauth2-proxy:identity:oauth2-proxy/oauth2-proxy:CHART_OAUTH2_PROXY:oauth2-proxy.yaml"
-  "vault:vault:hashicorp/vault:CHART_VAULT:vault.yaml"
-  "external-secrets:external-secrets:external-secrets/external-secrets:CHART_EXTERNAL_SECRETS:external-secrets.yaml"
-  "kps:observability:prometheus-community/kube-prometheus-stack:CHART_KUBE_PROM_STACK:kube-prometheus-stack.yaml"
-  "loki:observability:grafana/loki:CHART_LOKI:loki.yaml"
-  "alloy:observability:grafana/alloy:CHART_ALLOY:alloy.yaml"
-  "velero:velero:vmware-tanzu/velero:CHART_VELERO:velero.yaml"
-  "kyverno:kyverno:kyverno/kyverno:CHART_KYVERNO:kyverno.yaml"
-  "argocd:argocd:argo/argo-cd:CHART_ARGOCD:argo-cd.yaml"
-  "headlamp:headlamp:headlamp/headlamp:CHART_HEADLAMP:headlamp.yaml"
+  "cert-manager|cert-manager|jetstack/cert-manager|CHART_CERT_MANAGER|cert-manager.yaml"
+  "ingress-nginx|ingress-nginx|ingress-nginx/ingress-nginx|CHART_INGRESS_NGINX|ingress-nginx.yaml"
+  "metrics-server|kube-system|metrics-server/metrics-server|CHART_METRICS_SERVER|metrics-server.yaml"
+  "cnpg|cnpg-system|cnpg/cloudnative-pg|CHART_CNPG|cnpg.yaml"
+  "keycloak|identity|codecentric/keycloakx|CHART_KEYCLOAK|keycloak.yaml"
+  "oauth2-proxy|identity|oauth2-proxy/oauth2-proxy|CHART_OAUTH2_PROXY|oauth2-proxy.yaml"
+  "vault|vault|hashicorp/vault|CHART_VAULT|vault.yaml"
+  "external-secrets|external-secrets|external-secrets/external-secrets|CHART_EXTERNAL_SECRETS|external-secrets.yaml"
+  "kps|observability|prometheus-community/kube-prometheus-stack|CHART_KUBE_PROM_STACK|kube-prometheus-stack.yaml"
+  "loki|observability|grafana/loki|CHART_LOKI|loki.yaml"
+  "alloy|observability|grafana/alloy|CHART_ALLOY|alloy.yaml"
+  "velero|velero|vmware-tanzu/velero|CHART_VELERO|velero.yaml"
+  "kyverno|kyverno|kyverno/kyverno|CHART_KYVERNO|kyverno.yaml"
+  "argocd|argocd|argo/argo-cd|CHART_ARGOCD|argo-cd.yaml"
+  "headlamp|headlamp|headlamp/headlamp|CHART_HEADLAMP|headlamp.yaml"
+  "openshell|openshell|oci://ghcr.io/nvidia/openshell/helm-chart|CHART_OPENSHELL|openshell.yaml"
 )
 
 add_repos() {
@@ -118,7 +120,7 @@ if section versions; then
   add_repos
   log "checking that every pinned chart version still exists"
   for entry in "${CHARTS[@]}"; do
-    IFS=: read -r _ _ chart var _ <<<"${entry}"
+    IFS='|' read -r _ _ chart var _ <<<"${entry}"
     ver="${!var}"
     if helm show chart "${chart}" --version "${ver}" >/dev/null 2>&1; then
       ok "${chart} ${ver}"
@@ -138,13 +140,17 @@ if section charts; then
   log "rendering every chart against its pinned version"
   CHARTS_RENDERED=1
   for entry in "${CHARTS[@]}"; do
-    IFS=: read -r rel ns chart var vals <<<"${entry}"
+    IFS='|' read -r rel ns chart var vals <<<"${entry}"
     ver="${!var}"
     args=(template "${rel}" "${chart}" --version "${ver}" --namespace "${ns}")
     [[ -n "${vals}" ]] && args+=(-f "${LINT_DIR}/values/${vals}")
-    # --api-versions keeps the charts that branch on capabilities rendering
-    # the same objects they will on the real cluster.
-    args+=(--kube-version 1.37.0)
+    # Declare the CRD-backed API groups the real cluster has, so charts that
+    # gate on capabilities render what they actually will. OpenShell's
+    # preflight hard-fails without the Agent Sandbox group.
+    args+=(--kube-version 1.37.0
+           --api-versions agents.x-k8s.io/v1beta1
+           --api-versions agents.x-k8s.io/v1alpha1
+           --api-versions monitoring.coreos.com/v1)
     if out="$(helm "${args[@]}" 2>&1 >"${LINT_DIR}/${rel}.rendered.yaml")"; then
       ok "${rel} (${chart} ${ver})"
     else

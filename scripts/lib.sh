@@ -11,7 +11,7 @@ source "${ROOT_DIR}/config.env"
 
 export CLUSTER_NAME NODE_IMAGE HTTP_PORT HTTPS_PORT API_SERVER_PORT BASE_DOMAIN \
        REGISTRY_NAME REGISTRY_HOST_PORT CONTAINER_ENGINE NODE_IMAGE_ETCD PLATFORM_HOSTS SEALED_SECRETS_VERSION COSIGN_VERSION \
-       PG_INSTANCES
+       PG_INSTANCES CHART_OPENSHELL AGENT_SANDBOX_VERSION
 # Identity passwords are generated into .secrets/ on first install rather than
 # living in config.env. Resolve them here so every script -- urls, smoke
 # tests, keycloak-reconcile, demo -- sees the same value without each one
@@ -65,6 +65,8 @@ _el() { local d=$(( $(date +%s) - BUILD_T0 )); printf '%02d:%02d' $((d/60)) $((d
 # Per-step cost accounting, written to a file so a nested script's steps land
 # in the same ledger as its parent's.
 export STEP_LEDGER="${STEP_LEDGER:-${BUILD_DIR}/steps.tsv}"
+# Truncated by the top-level script only, so nested scripts append.
+[[ -n "${STEP_LEDGER_OWNER:-}" ]] || { export STEP_LEDGER_OWNER=$$; : > "${STEP_LEDGER}" 2>/dev/null || true; }
 step() {
   printf '%s\t%s\n' "$(( $(date +%s) - BUILD_T0 ))" "$*" >> "${STEP_LEDGER}" 2>/dev/null || true
   log "$@"
@@ -148,7 +150,7 @@ helm_install() {
       ;;
   esac
 
-  log "helm: ${release} (${chart}:${version}) -> ns/${ns}"
+  step "helm: ${release} (${chart}:${version}) -> ns/${ns}"
   local wait_args=(--wait --timeout 15m)
   [[ "${HELM_WAIT:-1}" == "0" ]] && wait_args=(--timeout 15m)
   helm upgrade --install "${release}" "${chart}" \

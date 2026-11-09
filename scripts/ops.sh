@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Day-to-day operator commands. Read-only unless stated.
 #
-# Usage: ops.sh <doctor|urls|status|token|seal|break-glass|demo|gitops|push|sign> [args]
+# Usage: ops.sh <doctor|urls|status|token|seal|break-glass|demo|gitops|push|sign|openshell> [args]
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 cmd_urls() {
@@ -468,14 +468,51 @@ cmd_doctor() {
   fi
 }
 
+cmd_openshell() {
+  # Sets up local access to the OpenShell gateway: pulls the client mTLS
+  # bundle the chart generated, registers the gateway with the CLI if it is
+  # installed, and port-forwards.
+  #
+  # Port-forward rather than ingress on purpose: the gateway requires client
+  # certificates, and an ingress proxy cannot present one on your behalf.
+  # Exposing it properly means enableMtls=false plus OIDC against Keycloak.
+  local ns=openshell
+  local dir="${HOME}/.config/openshell/gateways/k8s/mtls"
+  kc -n "${ns}" get statefulset openshell >/dev/null 2>&1 \
+    || die "openshell is not installed -- run: make install"
+
+  log "fetching the client TLS bundle"
+  mkdir -p "${dir}"
+  local k
+  for k in ca.crt tls.crt tls.key; do
+    kc -n "${ns}" get secret openshell-client-tls -o "jsonpath={.data.${k//./\\.}}" \
+      | base64 -d > "${dir}/${k}" \
+      || die "could not read ${k} from secret openshell-client-tls"
+  done
+  chmod 600 "${dir}"/tls.key
+  ok "client bundle in ${dir}"
+
+  if command -v openshell >/dev/null 2>&1; then
+    openshell gateway add https://127.0.0.1:8080 --local --name k8s >/dev/null 2>&1 \
+      && ok "gateway 'k8s' registered with the openshell CLI" \
+      || warn "could not register the gateway; add it manually once the port-forward is up"
+  else
+    warn "the 'openshell' CLI is not installed; the port-forward below still works"
+  fi
+
+  log "port-forwarding https://127.0.0.1:8080 (ctrl-c to stop)"
+  kc -n "${ns}" port-forward svc/openshell 8080:8080
+}
+
 _usage() {
-  echo "usage: $(basename "$0") <doctor|urls|status|token|seal|break-glass|demo|gitops|push|sign> [args]" >&2
+  echo "usage: $(basename "$0") <doctor|urls|status|token|seal|break-glass|demo|gitops|push|sign|openshell> [args]" >&2
   exit 2
 }
 [[ $# -ge 1 ]] || _usage
 _sub="$1"; shift
 case "${_sub}" in
   doctor) cmd_doctor "$@" ;;
+  openshell) cmd_openshell "$@" ;;
   urls) cmd_urls "$@" ;;
   status) cmd_status "$@" ;;
   token) cmd_token "$@" ;;

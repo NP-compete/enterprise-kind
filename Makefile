@@ -3,7 +3,7 @@ SHELL := /usr/bin/env bash
 S := ./scripts
 
 .PHONY: help create delete up install all down clean reset status urls smoke token trust-ca untrust-ca \
-        demo demo-load demo-down logs dashboards reinstall gitops-bootstrap push k9s \
+        demo demo-load demo-down logs dashboards reinstall gitops-bootstrap push k9s openshell \
         hosts unhosts break-glass seal restore-drill sign lint failover-drill doctor _sudo
 
 help: ## Show this help
@@ -105,6 +105,10 @@ sign: ## Sign an image so Kyverno will admit it (IMG=name:tag)
 push: ## Push a local image to the cluster registry (IMG=name:tag)
 	@test -n "$(IMG)" || { echo "usage: make push IMG=myapp:1.0"; exit 1; }
 	@$(S)/ops.sh push $(IMG)
+
+##@ Sandboxing
+openshell: ## Fetch the OpenShell client mTLS bundle and port-forward the gateway
+	@$(S)/ops.sh openshell
 
 ##@ GitOps
 gitops-bootstrap: ## Point Argo CD at a git repo (REPO=https://... [PATH=gitops])

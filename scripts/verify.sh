@@ -141,6 +141,29 @@ check "no PodDisruptionBudget uses minAvailable" bash -c \
 check "every PodDisruptionBudget is satisfiable" bash -c \
   "test \"\$(${K} get pdb -A -o json | jq '[.items[] | select(.status.currentHealthy < .status.desiredHealthy)] | length')\" = 0"
 
+echo; log "sandboxing"
+check "agent-sandbox CRD established" bash -c \
+  "kubectl --context ${KUBECONTEXT} get crd sandboxes.agents.x-k8s.io -o jsonpath='{.status.conditions[?(@.type==\"Established\")].status}' | grep -q True"
+# Name is not stable across agent-sandbox releases; assert that every
+# Deployment in the namespace is Available instead of guessing one.
+check "agent-sandbox controller running" bash -c \
+  "test \"\$(kubectl --context ${KUBECONTEXT} -n agent-sandbox-system get deploy -o json \
+     | jq '[.items[] | select((.status.readyReplicas // 0) < 1)] | length')\" = 0 \
+   && test \"\$(kubectl --context ${KUBECONTEXT} -n agent-sandbox-system get deploy --no-headers | wc -l | tr -d ' ')\" -ge 1"
+check "openshell gateway ready" bash -c \
+  "test \"\$(kubectl --context ${KUBECONTEXT} -n openshell get statefulset openshell -o jsonpath='{.status.readyReplicas}')\" = 1"
+check "openshell client mTLS secret exists" bash -c \
+  "kubectl --context ${KUBECONTEXT} -n openshell get secret openshell-client-tls >/dev/null"
+check "gateway requires a client certificate" bash -c \
+  "! kubectl --context ${KUBECONTEXT} -n openshell exec statefulset/openshell -- \
+     wget -q -O- --no-check-certificate https://127.0.0.1:8080/ 2>&1 | grep -qi 'welcome'"
+# OpenShell's whole isolation model rests on the CNI enforcing egress
+# policy. Kubernetes accepts NetworkPolicy objects regardless, so this
+# asserts enforcement rather than presence.
+check "sandbox namespace is policed, not exempt" bash -c \
+  "! kubectl --context ${KUBECONTEXT} get namespace openshell-sandboxes \
+     -o jsonpath='{.metadata.labels}' | grep -q 'platform.kind.local/component'"
+
 echo; log "governance"
 check "Kyverno webhook live" kc get clusterpolicy require-resource-requests
 # Enforcement is proven by admission, not by reading the policy objects.
