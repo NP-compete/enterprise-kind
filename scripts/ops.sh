@@ -1,0 +1,489 @@
+#!/usr/bin/env bash
+# Day-to-day operator commands. Read-only unless stated.
+#
+# Usage: ops.sh <doctor|urls|status|token|seal|break-glass|demo|gitops|push|sign> [args]
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+cmd_urls() {
+S="${ROOT_DIR}/.secrets"
+r() { [[ -s "${S}/$1" ]] && cat "${S}/$1" || echo '(run make install)'; }
+
+apw="$(kc -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+[[ -z "${apw}" ]] && apw="(disabled or rotated)"
+
+cat <<EOF
+
+  ┌─ single sign-on ───────────────────────────────────────────────────────┐
+   Sign in to every console below with one Keycloak account:
+
+     ${SSO_ADMIN_USERNAME} / ${SSO_ADMIN_PASSWORD}   (group: platform-admins)
+     ${SSO_VIEWER_USERNAME} / ${SSO_VIEWER_PASSWORD}   (group: platform-viewers)
+
+   Keycloak    https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}      realm: platform
+     admin console:  ${KEYCLOAK_ADMIN_USERNAME} / ${KEYCLOAK_ADMIN_PASSWORD}
+  └────────────────────────────────────────────────────────────────────────┘
+
+  ┌─ consoles ─────────────────────────────────────────────────────────────┐
+   Headlamp    https://headlamp.${BASE_DOMAIN}${URL_SUFFIX}
+                 "Sign in with OIDC", or a token from: make token
+   Argo CD     https://argocd.${BASE_DOMAIN}${URL_SUFFIX}
+                 "LOG IN VIA KEYCLOAK", or break-glass admin / ${apw}
+   Grafana     https://grafana.${BASE_DOMAIN}${URL_SUFFIX}
+                 "Sign in with Keycloak", or break-glass admin / $(r grafana-admin-password)
+   Prometheus  https://prometheus.${BASE_DOMAIN}${URL_SUFFIX}      (SSO via oauth2-proxy)
+   Alertmanager https://alertmanager.${BASE_DOMAIN}${URL_SUFFIX}   (SSO via oauth2-proxy)
+  └────────────────────────────────────────────────────────────────────────┘
+
+   Registry    https://registry.${BASE_DOMAIN}${URL_SUFFIX}   (TLS + auth)
+     browsing the UI prompts for the registry login:
+       $(r registry-username) / $(r registry-password)
+     push with:  make push IMG=myapp:1.0
+     endpoint:   localhost:${REGISTRY_HOST_PORT}  (in-cluster: ${REGISTRY_NAME}:5000)
+   Context    ${KUBECONTEXT}
+
+   Certificates are signed by the cluster's private CA. Run 'make trust-ca'
+   once to silence browser warnings, or accept the warning per host.
+
+EOF
+}
+
+cmd_status() {
+cluster_exists || die "cluster '${CLUSTER_NAME}' does not exist"
+
+echo; log "nodes"
+kc get nodes -L topology.kubernetes.io/zone,ingress-ready
+
+echo; log "helm releases"
+helm list -A --kube-context "${KUBECONTEXT}" -o table | sed 's/\t/  /g'
+
+echo; log "pods that are not Running/Completed"
+bad=$(kc get pods -A --no-headers 2>/dev/null | awk '$4!="Running" && $4!="Completed"' || true)
+if [[ -z "${bad}" ]]; then ok "every pod is healthy"; else echo "${bad}"; fi
+
+echo; log "warnings in the last 2 minutes (live problems only)"
+# Kubernetes keeps events for an hour, so a UI full of red is usually history.
+# This window is what actually matters right now.
+kc get events -A --field-selector type=Warning -o json 2>/dev/null | python3 -I -c "
+import sys, json, datetime
+now = datetime.datetime.now(datetime.timezone.utc)
+seen = {}
+for e in json.load(sys.stdin)['items']:
+    ts = e.get('lastTimestamp') or e.get('eventTime')
+    if not ts:
+        continue
+    age = (now - datetime.datetime.fromisoformat(ts.replace('Z', '+00:00'))).total_seconds()
+    if age < 120:
+        seen[(e['reason'], e['involvedObject'].get('name', ''))] = int(age)
+for (reason, name), age in sorted(seen.items(), key=lambda kv: kv[1]):
+    print(f'  {age:4}s ago  {reason}  {name}')
+if not seen:
+    print('  none -- anything red in a UI is older than this and already resolved')
+" 2>/dev/null || warn "could not read events"
+
+echo; log "ingresses"
+kc get ingress -A -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,HOST:.spec.rules[*].host,TLS:.spec.tls[*].secretName'
+
+echo; log "certificates"
+kc get certificate -A -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,READY:.status.conditions[0].status' 2>/dev/null || true
+
+echo; log "prometheus targets down"
+down=$(kc get --raw '/api/v1/namespaces/observability/services/kps-prometheus:9090/proxy/api/v1/targets?state=active' 2>/dev/null \
+  | jq -r '.data.activeTargets[] | select(.health!="up") | "  \(.scrapePool)  \(.lastError)"' 2>/dev/null | sort -u)
+if [[ -z "${down}" ]]; then ok "every scrape target is up"; else echo "${down}"; fi
+
+echo; log "kyverno policy violations"
+kc get policyreport -A --no-headers 2>/dev/null \
+  | awk '{f+=$4} END {if (f>0) print "  " f " failing rules -- kubectl get policyreport -A"; else print "  none"}' \
+  || warn "kyverno reports unavailable"
+echo
+}
+
+cmd_token() {
+# Mints a login token for the Headlamp console.
+#   scripts/ops.sh token          -> cluster-admin, 8h
+#   scripts/ops.sh token viewer   -> read-only, 8h
+
+role="${1:-admin}"
+case "${role}" in
+  admin)  sa=headlamp-login-admin ;;
+  viewer) sa=headlamp-login-viewer ;;
+  *) die "usage: token.sh [admin|viewer]" ;;
+esac
+
+tok="$(kc -n headlamp create token "${sa}" --duration=8h)"
+printf '%s\n' "${tok}"
+if command -v pbcopy >/dev/null 2>&1; then
+  printf '%s' "${tok}" | pbcopy
+  warn "copied to clipboard (${sa}, valid 8h)"
+fi
+}
+
+cmd_seal() {
+# Encrypt a Secret so it is safe to commit to git.
+#
+#   kubectl create secret generic my-secret --from-literal=k=v \
+#     --dry-run=client -o yaml | make seal > my-sealed-secret.yaml
+#
+# Only this cluster's sealed-secrets controller can decrypt the result. Its
+# private key lives in kube-system/sealed-secrets-key* and is covered by the
+# Velero daily schedule -- lose it and sealed secrets are unrecoverable.
+
+KUBESEAL="$(command -v kubeseal || true)"
+if [[ -z "${KUBESEAL}" ]]; then
+  # Vendor it rather than requiring a system install, so `make seal` just works.
+  KUBESEAL="${BUILD_DIR}/bin/kubeseal"
+  if [[ ! -x "${KUBESEAL}" ]]; then
+    mkdir -p "${BUILD_DIR}/bin"
+    case "$(uname -m)" in
+      arm64|aarch64) arch=arm64 ;;
+      *)             arch=amd64 ;;
+    esac
+    os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+    log "fetching kubeseal ${SEALED_SECRETS_VERSION} (${os}-${arch})"
+    curl -sL --fail \
+      "https://github.com/bitnami-labs/sealed-secrets/releases/download/${SEALED_SECRETS_VERSION}/kubeseal-${SEALED_SECRETS_VERSION#v}-${os}-${arch}.tar.gz" \
+      -o "${BUILD_DIR}/kubeseal.tgz" || die "could not download kubeseal"
+    tar -xzf "${BUILD_DIR}/kubeseal.tgz" -C "${BUILD_DIR}/bin" kubeseal || die "could not extract kubeseal"
+    chmod +x "${KUBESEAL}"
+  fi
+fi
+
+exec "${KUBESEAL}" --context "${KUBECONTEXT}" \
+  --controller-namespace kube-system \
+  --controller-name sealed-secrets-controller \
+  --format yaml
+}
+
+cmd_break_glass() {
+# Emergency access when Keycloak itself is down or misconfigured.
+#
+#   break-glass.sh on    -- re-enable the local login forms on Grafana and Argo CD
+#   break-glass.sh off   -- back to Keycloak-only (same as `make install`)
+#
+# This deliberately edits the live cluster rather than the values files, so the
+# next `make install` restores the SSO-only posture on its own.
+
+case "${1:-on}" in
+  on)
+    warn "re-enabling local logins -- this bypasses Keycloak"
+    kc -n observability patch secret kps-grafana --type merge \
+      -p "{\"stringData\":{\"admin-password\":\"$(cat "${ROOT_DIR}/.secrets/grafana-admin-password")\"}}" >/dev/null
+    kc -n observability get cm kps-grafana -o json \
+      | sed 's/disable_login_form = true/disable_login_form = false/; s/oauth_auto_login = true/oauth_auto_login = false/' \
+      | kc apply -f - >/dev/null
+    kc -n observability rollout restart deployment/kps-grafana >/dev/null
+    kc -n argocd patch configmap argocd-cm --type merge -p '{"data":{"admin.enable":"true"}}' >/dev/null
+    kc -n argocd rollout restart deployment/argocd-server >/dev/null
+    ok "local logins enabled"
+    echo
+    echo "  Grafana  admin / $(cat "${ROOT_DIR}/.secrets/grafana-admin-password")"
+    echo "  Argo CD  admin / $(kc -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || echo '(secret deleted -- argocd admin initial-password reset)')"
+    echo "  Headlamp use a ServiceAccount token: make token"
+    echo
+    warn "run 'make install' (or break-glass.sh off) to return to Keycloak-only"
+    ;;
+  off)
+    "${ROOT_DIR}/scripts/platform-install.sh"
+    ;;
+  *) die "usage: break-glass.sh [on|off]" ;;
+esac
+}
+
+cmd_demo() {
+# Deploys / removes the reference workload in the `apps` tenant namespace.
+
+SUBST='${BASE_DOMAIN}'
+rendered="${BUILD_DIR}/podinfo.yaml"
+envsubst "${SUBST}" < "${ROOT_DIR}/apps/podinfo/deployment.yaml" > "${rendered}"
+
+case "${1:-apply}" in
+  apply)
+    kc apply -f "${ROOT_DIR}/platform/manifests/tenant-namespace.yaml" >/dev/null
+    kc apply -f "${rendered}"
+    wait_rollout apps deployment/podinfo
+    suffix=""; [[ "${HTTPS_PORT}" != "443" ]] && suffix=":${HTTPS_PORT}"
+    ok "podinfo up at https://podinfo.${BASE_DOMAIN}${suffix}"
+    ;;
+  delete)
+    kc delete -f "${rendered}" --ignore-not-found
+    ok "podinfo removed"
+    ;;
+  load)
+    # Generate traffic so the dashboards and traces have something to show.
+    suffix=""; [[ "${HTTPS_PORT}" != "443" ]] && suffix=":${HTTPS_PORT}"
+    log "sending traffic to podinfo for 60s"
+    end=$(( $(date +%s) + 60 ))
+    while [[ $(date +%s) -lt ${end} ]]; do
+      curl -sk -o /dev/null "https://podinfo.${BASE_DOMAIN}${suffix}/" || true
+      curl -sk -o /dev/null "https://podinfo.${BASE_DOMAIN}${suffix}/delay/1" || true
+      curl -sk -o /dev/null "https://podinfo.${BASE_DOMAIN}${suffix}/status/500" || true
+    done
+    ok "traffic generated"
+    ;;
+  *) die "usage: demo.sh [apply|delete|load]" ;;
+esac
+}
+
+cmd_gitops() {
+# Hands this repository to Argo CD.
+#   make gitops-bootstrap REPO=https://github.com/you/kind-platform.git
+# Optional: PATH_=gitops  REV=main  (private repos: GIT_USERNAME / GIT_TOKEN)
+
+GITOPS_REPO="${REPO:-${GITOPS_REPO:-}}"
+GITOPS_PATH="${PATH_:-${GITOPS_PATH:-gitops}}"
+GITOPS_REVISION="${REV:-${GITOPS_REVISION:-HEAD}}"
+[[ -n "${GITOPS_REPO}" ]] || die "set REPO=<git url>, e.g. make gitops-bootstrap REPO=https://github.com/you/repo.git"
+export GITOPS_REPO GITOPS_PATH GITOPS_REVISION
+
+if [[ -n "${GIT_TOKEN:-}" ]]; then
+  log "registering repository credentials"
+  kc -n argocd create secret generic gitops-repo \
+    --from-literal=type=git \
+    --from-literal=url="${GITOPS_REPO}" \
+    --from-literal=username="${GIT_USERNAME:-git}" \
+    --from-literal=password="${GIT_TOKEN}" \
+    --dry-run=client -o yaml \
+    | kc label --local -f - argocd.argoproj.io/secret-type=repository -o yaml \
+    | kc apply -f - >/dev/null
+  ok "credentials stored in argocd/gitops-repo"
+fi
+
+envsubst '${GITOPS_REPO} ${GITOPS_PATH} ${GITOPS_REVISION}' \
+  < "${ROOT_DIR}/gitops/root-app.yaml" > "${BUILD_DIR}/root-app.yaml"
+kc apply -f "${BUILD_DIR}/root-app.yaml"
+ok "Argo CD now reconciles ${GITOPS_REPO}:${GITOPS_REVISION}/${GITOPS_PATH}/apps"
+warn "child Applications under gitops/apps/ use \${GITOPS_REPO}; replace it with your repo URL before pushing"
+}
+
+cmd_push() {
+# Push a local image into the cluster registry.
+#
+#   make push IMG=myapp:1.0
+#
+# The registry is TLS-protected and requires auth, so this logs in first using
+# the generated credentials in .secrets/.
+
+IMG="${1:?usage: push.sh <image:tag>}"
+USER_FILE="${ROOT_DIR}/.secrets/registry-username"
+PASS_FILE="${ROOT_DIR}/.secrets/registry-password"
+[[ -s "${PASS_FILE}" ]] || die "no registry credentials -- run scripts/cluster.sh pki"
+
+REF="localhost:${REGISTRY_HOST_PORT}/${IMG}"
+log "logging in to localhost:${REGISTRY_HOST_PORT}"
+"${CE}" login --cert-dir "${ROOT_DIR}/.secrets" \
+  -u "$(cat "${USER_FILE}")" -p "$(cat "${PASS_FILE}")" \
+  "localhost:${REGISTRY_HOST_PORT}" >/dev/null 2>&1 \
+  || "${CE}" login --tls-verify=false \
+       -u "$(cat "${USER_FILE}")" -p "$(cat "${PASS_FILE}")" \
+       "localhost:${REGISTRY_HOST_PORT}" >/dev/null \
+  || die "registry login failed"
+
+"${CE}" tag "${IMG}" "${REF}"
+"${CE}" push --tls-verify=false "${REF}" >/dev/null || die "push failed"
+ok "pushed ${REF}"
+echo
+echo "  In a pod:   image: ${REGISTRY_NAME}:5000/${IMG}"
+echo "              (not localhost:${REGISTRY_HOST_PORT}/... -- Kyverno verifies the in-cluster name)"
+echo "  Needs:      imagePullSecrets: [{name: registry-creds}]"
+echo "  The 'apps' namespace already has it on its default ServiceAccount."
+}
+
+cmd_sign() {
+# Sign an image in the local registry so Kyverno will admit it.
+#
+#   make push IMG=myapp:1.0      # push it
+#   make sign IMG=myapp:1.0      # sign it
+#
+# Key-based signing with no transparency log: there is no Rekor instance here,
+# and reaching the public one would make local builds depend on the internet.
+# The trade-off is no independent audit trail of what was signed when.
+
+IMG="${1:?usage: sign-image.sh <image:tag>}"
+REF="localhost:${REGISTRY_HOST_PORT}/${IMG}"
+COSIGN_BIN="${BUILD_DIR}/bin/cosign"
+KEY="${ROOT_DIR}/.secrets/cosign.key"
+
+if [[ ! -x "${COSIGN_BIN}" ]]; then
+  mkdir -p "${BUILD_DIR}/bin"
+  case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; *) arch=amd64 ;; esac
+  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  log "fetching cosign ${COSIGN_VERSION}"
+  # v2: supports offline key-based signing directly. v3 requires a signing
+  # config to disable the transparency log, which buys nothing locally.
+  curl -sL --fail "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-${os}-${arch}" \
+    -o "${COSIGN_BIN}" || die "could not download cosign"
+  chmod +x "${COSIGN_BIN}"
+fi
+
+if [[ ! -s "${KEY}" ]]; then
+  log "generating a cosign signing key"
+  COSIGN_PASSWORD="" "${COSIGN_BIN}" generate-key-pair \
+    --output-key-prefix "${ROOT_DIR}/.secrets/cosign" >/dev/null 2>&1 \
+    || die "could not generate a cosign key pair"
+  chmod 600 "${KEY}"
+  warn "new signing key -- re-run 'make install' so Kyverno picks up the public key"
+fi
+
+COSIGN_PASSWORD="" "${COSIGN_BIN}" sign --yes --key "${KEY}" \
+  --tlog-upload=false --allow-insecure-registry \
+  --registry-username "$(cat "${ROOT_DIR}/.secrets/registry-username")" \
+  --registry-password "$(cat "${ROOT_DIR}/.secrets/registry-password")" \
+  "${REF}" >/dev/null 2>&1 || die "signing failed"
+
+COSIGN_PASSWORD="" "${COSIGN_BIN}" verify --key "${ROOT_DIR}/.secrets/cosign.pub" \
+  --insecure-ignore-tlog=true --allow-insecure-registry \
+  --registry-username "$(cat "${ROOT_DIR}/.secrets/registry-username")" \
+  --registry-password "$(cat "${ROOT_DIR}/.secrets/registry-password")" \
+  "${REF}" >/dev/null 2>&1 || die "signed, but verification failed"
+
+ok "signed and verified: ${REF}"
+}
+
+cmd_doctor() {
+  # Checks the things that actually broke during development, in dependency
+  # order, and stops at the first that would make later checks meaningless.
+  # Every failure prints the command that fixes it.
+  local issues=0
+  _bad()  { printf '  %s %s\n' "$(_c '1;31' '✗')" "$1" >&2; shift; local l
+            for l in "$@"; do printf '      %s\n' "${l}" >&2; done; issues=$((issues+1)); }
+  _good() { printf '  %s %s\n' "$(_c '1;32' '✓')" "$1" >&2; }
+
+  echo; log "diagnosing ${CLUSTER_NAME}"
+
+  # --- host prerequisites --------------------------------------------------
+  local missing=()
+  for t in kind kubectl helm jq openssl envsubst "${CONTAINER_ENGINE}"; do
+    command -v "$t" >/dev/null 2>&1 || missing+=("$t")
+  done
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    _bad "missing tools: ${missing[*]}" "brew install ${missing[*]}"
+  else _good "required tools present"; fi
+
+  if ! "${CONTAINER_ENGINE}" info >/dev/null 2>&1; then
+    _bad "${CONTAINER_ENGINE} is not responding" \
+         "podman machine start"
+    echo; die "${issues} problem(s); nothing else can be checked"
+  fi
+  _good "${CONTAINER_ENGINE} is running"
+
+  # --- cluster -------------------------------------------------------------
+  if ! cluster_exists; then
+    _bad "cluster '${CLUSTER_NAME}' does not exist" "make up && make install"
+    echo; die "${issues} problem(s) found"
+  fi
+  _good "cluster '${CLUSTER_NAME}' exists"
+
+  if ! kc get --raw /readyz >/dev/null 2>&1; then
+    _bad "the API server is not answering" \
+         "podman start ${CLUSTER_NAME}-control-plane" \
+         "if that fails: make clean && make all"
+    echo; die "${issues} problem(s) found"
+  fi
+  _good "API server reachable"
+
+  local notready
+  notready="$(kc get nodes --no-headers 2>/dev/null | grep -cv ' Ready ' || true)"
+  [[ "${notready}" == "0" ]] \
+    && _good "all nodes Ready" \
+    || _bad "${notready} node(s) not Ready" "kubectl get nodes" "kubectl describe node <name>"
+
+  # --- secrets / cluster mismatch -----------------------------------------
+  # .secrets/ outlives `make clean`, so a rebuilt cluster can inherit
+  # credentials belonging to a Vault that no longer exists.
+  if [[ -s "${ROOT_DIR}/.secrets/vault-installer-secret-id" ]] \
+     && kc -n vault get pod vault-0 >/dev/null 2>&1; then
+    if kc -n vault exec vault-0 -- vault status 2>/dev/null | grep -q 'Sealed  *false'; then
+      if ! kc -n vault exec vault-0 -- vault write -field=token auth/approle/login \
+           role_id="$(cat "${ROOT_DIR}/.secrets/vault-installer-role-id" 2>/dev/null)" \
+           secret_id="$(cat "${ROOT_DIR}/.secrets/vault-installer-secret-id")" \
+           >/dev/null 2>&1; then
+        _bad "Vault credentials in .secrets/ belong to a previous cluster" \
+             "make reset   # wipes .secrets/ and rebuilds from nothing"
+      else _good "Vault credentials match this cluster"; fi
+    fi
+  fi
+
+  # --- sealed Vault --------------------------------------------------------
+  if kc -n vault get pod vault-0 >/dev/null 2>&1; then
+    if kc -n vault exec vault-0 -- vault status 2>/dev/null | grep -q 'Sealed  *true'; then
+      _bad "Vault is sealed (normal after any restart)" "./scripts/identity.sh vault"
+    else _good "Vault unsealed"; fi
+  fi
+
+  # --- workloads -----------------------------------------------------------
+  local bad
+  bad="$(kc get pods -A --no-headers 2>/dev/null | grep -vc 'Running\|Completed' || true)"
+  if [[ "${bad}" != "0" ]]; then
+    _bad "${bad} pod(s) not Running" \
+         "kubectl get pods -A | grep -v Running" \
+         "re-run 'make install' -- it is idempotent and resumes"
+  else _good "all pods Running"; fi
+
+  local pending
+  pending="$(kc get pods -A --field-selector status.phase=Pending --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ "${pending}" != "0" ]]; then
+    _bad "${pending} pod(s) Pending" \
+         "kubectl get events -A --field-selector reason=FailedScheduling" \
+         "usually a ResourceQuota or leftover anti-affinity from an old ReplicaSet"
+  fi
+
+  # --- unsatisfiable PDBs, which silently block every drain ----------------
+  local badpdb
+  badpdb="$(kc get pdb -A -o json 2>/dev/null \
+            | jq '[.items[] | select(.status.currentHealthy < .status.desiredHealthy)] | length' 2>/dev/null || echo 0)"
+  [[ "${badpdb}" == "0" ]] \
+    && _good "all PodDisruptionBudgets satisfiable" \
+    || _bad "${badpdb} PodDisruptionBudget(s) cannot be satisfied" \
+            "kubectl get pdb -A" \
+            "at one replica a budget must be maxUnavailable, never minAvailable"
+
+  # --- host wiring ---------------------------------------------------------
+  if grep -q "home.${BASE_DOMAIN}" /etc/hosts 2>/dev/null; then
+    _good "/etc/hosts maps *.${BASE_DOMAIN}"
+  else
+    _bad "*.${BASE_DOMAIN} is not in /etc/hosts -- consoles will not resolve" "make hosts"
+  fi
+
+  if [[ -s "${ROOT_DIR}/.secrets/platform-root-ca.crt" ]] \
+     && security find-certificate -c "platform-root-ca" >/dev/null 2>&1; then
+    _good "platform CA trusted by macOS"
+  elif [[ -s "${ROOT_DIR}/.secrets/platform-root-ca.crt" ]]; then
+    _bad "platform CA is not in the keychain -- browsers will warn" "make trust-ca"
+  fi
+
+  # --- ingress -------------------------------------------------------------
+  if curl -sk --max-time 10 -o /dev/null "https://home.${BASE_DOMAIN}${URL_SUFFIX}/" 2>/dev/null; then
+    _good "https://home.${BASE_DOMAIN}${URL_SUFFIX} responds"
+  else
+    _bad "the portal is not answering" \
+         "kubectl -n ingress-nginx get pods" \
+         "make hosts   # if the name does not resolve"
+  fi
+
+  echo
+  if [[ ${issues} -eq 0 ]]; then
+    ok "no problems found -- try 'make urls' or 'make smoke'"
+  else
+    die "${issues} problem(s) found; fixes are listed above"
+  fi
+}
+
+_usage() {
+  echo "usage: $(basename "$0") <doctor|urls|status|token|seal|break-glass|demo|gitops|push|sign> [args]" >&2
+  exit 2
+}
+[[ $# -ge 1 ]] || _usage
+_sub="$1"; shift
+case "${_sub}" in
+  doctor) cmd_doctor "$@" ;;
+  urls) cmd_urls "$@" ;;
+  status) cmd_status "$@" ;;
+  token) cmd_token "$@" ;;
+  seal) cmd_seal "$@" ;;
+  break-glass) cmd_break_glass "$@" ;;
+  demo) cmd_demo "$@" ;;
+  gitops) cmd_gitops "$@" ;;
+  push) cmd_push "$@" ;;
+  sign) cmd_sign "$@" ;;
+  *) _usage ;;
+esac

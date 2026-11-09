@@ -1,0 +1,65 @@
+---
+# The platform's Postgres, run by CloudNativePG.
+#
+# ${PG_INSTANCES} instance(s). Above one, CNPG promotes a replica on primary
+# loss and repoints the `-rw` Service, so callers never name a pod directly.
+#
+# Two databases: `keycloak` (realms, users, sessions) and `grafana`
+# (dashboards, annotations, sessions).
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: platform-pg
+  namespace: identity
+  labels:
+    app.kubernetes.io/name: platform-pg
+    owner: platform-team
+spec:
+  instances: ${PG_INSTANCES}
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.10-bookworm
+
+  primaryUpdateStrategy: unsupervised
+
+  # At one instance CNPG's PDB would be `minAvailable: 1` over a single pod,
+  # never satisfiable during an eviction, leaving the node undrainable.
+  # Re-enable together with instances > 1.
+  enablePDB: false
+
+  # Required, so instances never share a node. Raising PG_INSTANCES above the
+  # worker count will correctly leave the extra pods Pending.
+  affinity:
+    enablePodAntiAffinity: true
+    topologyKey: kubernetes.io/hostname
+    podAntiAffinityType: required
+
+  postgresql:
+    parameters:
+      max_connections: "200"
+      shared_buffers: "128MB"
+    pg_hba:
+      - host all all 10.244.0.0/16 scram-sha-256
+
+  bootstrap:
+    initdb:
+      database: keycloak
+      owner: keycloak
+      secret:
+        name: platform-pg-keycloak
+      # Grafana's role and database cannot be declared in initdb (it bootstraps
+      # exactly one), so they are created here on first boot. The password is
+      # set by the reconcile step in platform-install.sh, which runs on every
+      # install and is therefore also the path that rotates it.
+      postInitSQL:
+        - CREATE ROLE grafana LOGIN;
+        - CREATE DATABASE grafana OWNER grafana;
+
+  storage:
+    size: 5Gi
+    storageClass: standard
+
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 1Gi }
+
+  monitoring:
+    enablePodMonitor: true

@@ -1,0 +1,129 @@
+---
+# Stop any single platform component from starving the others. These are
+# generous relative to measured usage -- the point is a ceiling, not a squeeze.
+# Namespaces that must never be throttled (CNI, DNS, storage) are left alone
+# on purpose: quota-induced failure there takes the cluster down.
+#
+# A ResourceQuota makes requests MANDATORY for every pod in the namespace.
+# Chart hook Jobs routinely omit them (Argo CD's redis-secret-init does), so
+# each quota is paired with a LimitRange supplying defaults -- without it the
+# quota silently blocks installs.
+#
+# These quota REQUESTS, not limits. Quotaing limits.memory looked like a
+# tighter ceiling and was actually a trap: limits here are deliberately set
+# at 2-4x requests as burst headroom, so `limits.memory` sums to a number far
+# above anything the cluster will really use, and capping it rejects pods
+# that fit comfortably. Going HA pushed observability to 21Gi of summed
+# limits against 6.4Gi of actual requests, and the next chart hook Job could
+# not schedule -- which is how a resource *ceiling* turned into an install
+# failure. Requests are what the scheduler packs against, so that is what is
+# bounded.
+#
+# Ceilings are set well above expected single-replica usage -- a quota here
+# is a backstop against one component running away, not a squeeze. Sizing
+# them tightly is how a previous revision turned a resource ceiling into an
+# install failure. Re-measure any time with:
+#   kubectl describe resourcequota platform-quota -n <ns>
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: platform-quota
+  namespace: observability
+spec:
+  hard:
+    # single-replica expectation: ~1.5Gi requests, ~20 pods
+    requests.cpu: "2"
+    requests.memory: 4Gi
+    pods: "40"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: platform-quota
+  namespace: argocd
+spec:
+  hard:
+    # single-replica expectation: ~1.0Gi requests, ~8 pods
+    requests.cpu: "1"
+    requests.memory: 2Gi
+    pods: "20"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: platform-quota
+  namespace: identity
+spec:
+  hard:
+    # single-replica expectation: ~1.0Gi requests, ~5 pods
+    requests.cpu: "1"
+    requests.memory: 2Gi
+    pods: "15"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: platform-quota
+  namespace: kyverno
+spec:
+  hard:
+    # single-replica expectation: ~0.5Gi requests, ~5 pods
+    requests.cpu: "1"
+    requests.memory: 1Gi
+    pods: "15"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: platform-defaults
+  namespace: observability
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+      default:
+        memory: 512Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: platform-defaults
+  namespace: argocd
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+      default:
+        memory: 512Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: platform-defaults
+  namespace: identity
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+      default:
+        memory: 512Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: platform-defaults
+  namespace: kyverno
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+      default:
+        memory: 512Mi

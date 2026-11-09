@@ -1,0 +1,32 @@
+# Images preloaded into the baked node image. Regenerate against a
+# running cluster with:  ./scripts/cluster.sh node-image list
+# Keep sorted; the tag of the baked image is a hash of this file.
+docker.io/bitnami/sealed-secrets-controller:0.41.2
+docker.io/busybox:1.37
+docker.io/chrislusf/seaweedfs:3.80
+docker.io/kindest/local-path-provisioner:v20260820-69b56db7
+ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1
+ghcr.io/cloudnative-pg/postgresql:16.10-bookworm
+ghcr.io/external-secrets/external-secrets:v2.14.0
+hashicorp/vault:2.0.4
+quay.io/calico/calico:v3.33.0
+quay.io/calico/node:v3.33.0
+quay.io/calico/third-party-cni-plugins:v3.33.0
+quay.io/calico/whisker:v3.33.0
+quay.io/jetstack/cert-manager-cainjector:v1.21.3
+quay.io/jetstack/cert-manager-controller:v1.21.3
+quay.io/jetstack/cert-manager-webhook:v1.21.3
+quay.io/keycloak/keycloak:26.8.1
+quay.io/oauth2-proxy/oauth2-proxy:v7.15.5
+quay.io/tigera/operator:v1.44.0
+registry.k8s.io/coredns/coredns:v1.14.6
+registry.k8s.io/defaultbackend-amd64:1.5
+registry.k8s.io/etcd:3.7.0-0
+registry.k8s.io/ingress-nginx/controller:v1.15.1@sha256:594ceea76b01c592858f803f9ff4d2cb40542cae2060410b2c95f75907d659e1
+registry.k8s.io/kube-apiserver:v1.37.0
+registry.k8s.io/kube-controller-manager:v1.37.0
+registry.k8s.io/kube-proxy:v1.37.0
+registry.k8s.io/kube-scheduler:v1.37.0
+registry.k8s.io/metrics-server/metrics-server:v0.9.0
+velero/velero-plugin-for-aws:v1.13.0
+velero/velero:v1.18.2

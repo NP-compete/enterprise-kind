@@ -1,7 +1,9 @@
 ---
 fullnameOverride: kps
+# Applied server-side by platform-install.sh before any chart, so every
+# component can create its ServiceMonitor on first install.
 crds:
-  enabled: true
+  enabled: false
 
 alertmanager:
   ingress:
@@ -75,10 +77,12 @@ prometheus:
         hosts: ["prometheus.${BASE_DOMAIN}"]
   prometheusSpec:
     replicas: 1
-    retention: 15d
-    retentionSize: 8GB
-    scrapeInterval: 30s
-    evaluationInterval: 30s
+    # Resident memory tracks active series, driven by retention and scrape
+    # frequency, so both come down together. Was 15d/30s at 1.15 GiB.
+    retention: 2d
+    retentionSize: 2GB
+    scrapeInterval: 60s
+    evaluationInterval: 60s
     enableRemoteWriteReceiver: true
     enableFeatures:
       - exemplar-storage
@@ -91,18 +95,20 @@ prometheus:
     externalLabels:
       cluster: ${CLUSTER_NAME}
     resources:
-      requests: { cpu: 200m, memory: 1Gi }
-      limits: { memory: 3Gi }
+      requests: { cpu: 100m, memory: 384Mi }
+      limits: { memory: 1Gi }
     storageSpec:
       volumeClaimTemplate:
         spec:
           storageClassName: standard
           accessModes: ["ReadWriteOnce"]
-          resources: { requests: { storage: 12Gi } }
+          resources: { requests: { storage: 4Gi } }
 
 grafana:
   enabled: true
   replicas: 1
+  deploymentStrategy:
+    type: RollingUpdate
   adminPassword: ${GRAFANA_ADMIN_PASSWORD}
   defaultDashboardsTimezone: browser
   ingress:
@@ -116,10 +122,9 @@ grafana:
     tls:
       - secretName: grafana-tls
         hosts: ["grafana.${BASE_DOMAIN}"]
+  # State is in Postgres, so the pods are disposable and need no volume.
   persistence:
-    enabled: true
-    storageClassName: standard
-    size: 4Gi
+    enabled: false
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits: { memory: 768Mi }
@@ -137,7 +142,21 @@ grafana:
       mountPath: /etc/grafana/oidc
       readOnly: true
       defaultMode: 0440
+    - name: grafana-db
+      secretName: grafana-db
+      mountPath: /etc/grafana/db
+      readOnly: true
+      defaultMode: 0440
   grafana.ini:
+    database:
+      # On the CloudNativePG cluster rather than the default SQLite, so the
+      # pod carries no state and needs no PVC.
+      type: postgres
+      host: platform-pg-rw.identity.svc.cluster.local:5432
+      name: grafana
+      user: grafana
+      password: $__file{/etc/grafana/db/password}
+      ssl_mode: disable
     server:
       root_url: https://grafana.${BASE_DOMAIN}${URL_SUFFIX}
     users:
@@ -196,32 +215,6 @@ grafana:
       jsonData:
         timeout: 60
         maxLines: 1000
-        derivedFields:
-          - name: TraceID
-            matcherRegex: '"trace_id":"(\w+)"'
-            url: '$${__value.raw}'
-            datasourceUid: tempo
-    - name: Tempo
-      type: tempo
-      uid: tempo
-      access: proxy
-      url: http://tempo.observability.svc.cluster.local:3200
-      jsonData:
-        tracesToLogsV2:
-          datasourceUid: loki
-          spanStartTimeShift: -5m
-          spanEndTimeShift: 5m
-          filterByTraceID: true
-          tags: [{ key: "service.name", value: "service_name" }]
-        tracesToMetrics:
-          datasourceUid: prometheus
-          tags: [{ key: "service.name", value: "service" }]
-        serviceMap:
-          datasourceUid: prometheus
-        nodeGraph:
-          enabled: true
-        lokiSearch:
-          datasourceUid: loki
 
 # --- control-plane scrape targets, wired for kind ---
 kubeApiServer:
@@ -229,8 +222,11 @@ kubeApiServer:
 kubelet:
   enabled: true
   serviceMonitor:
-    cAdvisor: true
-    probes: true
+    # cAdvisor's per-container series dominate cardinality here. The numbers
+    # the dashboards read come from kube-state-metrics and the resource
+    # endpoint, both still on.
+    cAdvisor: false
+    probes: false
     resource: true
     # The chart still defaults to the long-removed /metrics/resource/v1alpha1 path.
     resourcePath: /metrics/resource
@@ -273,6 +269,12 @@ coreDns:
   enabled: true
 
 kube-state-metrics:
+  # Leader-elected, so the second pod is a warm standby rather than a second
+  # source of metrics -- which is what you want, since two active instances
+  # would double-count every series.
+  replicas: 1
+  autosharding:
+    enabled: false
   metricLabelsAllowlist:
     - pods=[*]
     - deployments=[*]
@@ -286,6 +288,8 @@ prometheus-node-exporter:
     requests: { cpu: 20m, memory: 32Mi }
     limits: { memory: 128Mi }
 
+# Note: the chart hardcodes `replicas: 1` in this Deployment with no value
+# behind it, so `prometheusOperator.replicas` is accepted and ignored.
 prometheusOperator:
   resources:
     requests: { cpu: 50m, memory: 128Mi }

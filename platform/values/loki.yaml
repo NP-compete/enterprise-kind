@@ -1,11 +1,13 @@
 ---
-# Single-binary Loki on the local-path PVC. Enough for a laptop-scale enterprise
-# replica; swap deploymentMode to SimpleScalable + object storage for real clusters.
+# Single-binary Loki. At one replica per target, SimpleScalable is strictly
+# worse: same single point of failure, three times the process overhead.
+# Chunks and index live in the object store, so data outlives the pod.
 deploymentMode: SingleBinary
 
 loki:
   auth_enabled: false
   commonConfig:
+    # One ingester, so nothing to replicate to.
     replication_factor: 1
   storage:
     # Object storage, so logs survive losing the node Loki happens to run on.
@@ -55,17 +57,17 @@ loki:
 singleBinary:
   replicas: 1
   resources:
-    requests: { cpu: 100m, memory: 384Mi }
-    limits: { memory: 2Gi }
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 1Gi }
   persistence:
     enabled: true
     storageClass: standard
-    size: 12Gi
+    size: 10Gi
 
 # Everything below is the distributed topology -- off in SingleBinary mode.
-backend: { replicas: 0 }
-read: { replicas: 0 }
 write: { replicas: 0 }
+read: { replicas: 0 }
+backend: { replicas: 0 }
 ingester: { replicas: 0 }
 querier: { replicas: 0 }
 queryFrontend: { replicas: 0 }

@@ -1,0 +1,97 @@
+name: ci
+
+# What this gates: the chart versions pinned in config.env.
+#
+# A cold `make all` takes about twenty minutes and needs a container engine,
+# so CI does not build the cluster. It does the one check that catches the
+# failure mode that actually bites -- bumping a chart whose values keys moved
+# underneath us. `helm template` against the pinned version finds that in
+# seconds, before the bump is merged and someone's rebuild fails at minute
+# eighteen.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Pinned versions can be yanked from an index without anyone touching this
+  # repo, so re-run the same checks on a schedule rather than only on change.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: Install kubeconform and shellcheck
+        run: |
+          set -euo pipefail
+          KC_VERSION=v0.6.7
+          curl -fsSL -o /tmp/kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/${KC_VERSION}/kubeconform-linux-amd64.tar.gz"
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp kubeconform
+          sudo install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck gettext-base
+
+      # Split into named steps so a failure says which kind of thing broke
+      # rather than just "lint failed".
+      - name: Pinned chart versions still exist
+        run: ONLY=versions ./scripts/lint.sh
+
+      - name: Charts render against their pinned versions
+        run: ONLY=charts ./scripts/lint.sh
+
+      - name: Raw manifests validate
+        run: ONLY=manifests ./scripts/lint.sh
+
+      - name: Shell scripts
+        run: ONLY=shell ./scripts/lint.sh
+
+  # The README's footprint claim is an assertion about replica counts and
+  # node layout. Checked here so an edit cannot silently double the budget.
+  footprint-invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No platform component declares more than one replica
+        run: |
+          set -euo pipefail
+          if grep -rnE '^\s*(replicas|replicaCount):\s*([2-9]|[1-9][0-9]+)\s*$' platform/values/; then
+            echo "::error::a platform component is scaled above one replica"
+            exit 1
+          fi
+          echo "all components are single-replica"
+      - name: Cluster is one control plane and one worker
+        run: |
+          set -euo pipefail
+          cp=$(grep -c 'role: control-plane' cluster/kind-config.yaml)
+          wk=$(grep -c 'role: worker' cluster/kind-config.yaml)
+          echo "control-plane=$cp worker=$wk"
+          [ "$cp" = 1 ] && [ "$wk" = 1 ] || {
+            echo "::error::node count changed; the ~8 GiB budget assumes 1+1"
+            exit 1; }
+      - name: Dropped components stay dropped
+        run: |
+          set -euo pipefail
+          fail=0
+          for f in metallb tempo trivy-operator keda; do
+            if [ -f "platform/values/$f.yaml" ]; then
+              echo "::error::platform/values/$f.yaml is back"; fail=1
+            fi
+          done
+          grep -q 'redis-ha:' platform/values/argo-cd.yaml &&
+            grep -A1 'redis-ha:' platform/values/argo-cd.yaml | grep -q 'enabled: false' || {
+              echo "::error::argo-cd redis-ha is not disabled"; fail=1; }
+          exit $fail

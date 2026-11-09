@@ -58,7 +58,7 @@ resources:
 metrics:
   enabled: true
   serviceMonitor:
-    enabled: false # flipped on by the post-install pass
+    enabled: true
 
 schedules:
   daily:

@@ -7,7 +7,6 @@ image:
   tag: "26.8.1"
 
 replicas: 1
-
 # Satisfies the require-ownership-labels policy.
 statefulsetLabels:
   owner: platform-team
@@ -23,6 +22,8 @@ command:
 args:
   - start
   - --import-realm
+  # Single replica: `local` skips the JGroups stack entirely.
+  - --cache=local
 
 http:
   relativePath: "/"
@@ -35,7 +36,9 @@ proxy:
 
 database:
   vendor: postgres
-  hostname: keycloak-postgres.identity.svc.cluster.local
+  # CloudNativePG's read-write Service. It follows the primary across a
+  # failover, so Keycloak never has to be told which pod is currently primary.
+  hostname: platform-pg-rw.identity.svc.cluster.local
   port: 5432
   database: keycloak
   username: keycloak
@@ -77,7 +80,12 @@ extraEnv: |
         name: keycloak-bootstrap-admin
         key: password
   - name: JAVA_OPTS_APPEND
-    value: -XX:MaxRAMPercentage=70
+    # A hard ceiling holds Keycloak near 400 MiB; percentage-based sizing let
+    # it reach 1.4 GiB. Raise both together if logins hit OutOfMemoryError.
+    # Do NOT add a -XX:+Use*GC flag: these are appended to the image's own
+    # JAVA_OPTS, which already picks one, and the JVM then refuses to start
+    # with "Multiple garbage collectors selected".
+    value: -Xms128m -Xmx384m -XX:MaxMetaspaceSize=192m
 
 extraVolumes: |
   - name: realm
@@ -106,8 +114,8 @@ ingress:
         - keycloak.${BASE_DOMAIN}
 
 resources:
-  requests: { cpu: 200m, memory: 768Mi }
-  limits: { memory: 2Gi }
+  requests: { cpu: 200m, memory: 512Mi }
+  limits: { memory: 1Gi }
 
 podSecurityContext:
   runAsNonRoot: true
@@ -127,4 +135,4 @@ health:
   enabled: true
 
 serviceMonitor:
-  enabled: false # flipped on by the post-install pass
+  enabled: true

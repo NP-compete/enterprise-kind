@@ -2,7 +2,6 @@
 # Headlamp is the general-purpose cluster UI: browse/edit every resource, exec
 # into pods, stream logs, read events. Sign in with the token from `make token`.
 replicaCount: 1
-
 config:
   baseURL: ""
   pluginsDir: /build/plugins

@@ -4,21 +4,11 @@ args:
   - --kubelet-insecure-tls
   - --kubelet-preferred-address-types=InternalIP,Hostname,ExternalIP
   - --metric-resolution=15s
-replicas: 2
-podDisruptionBudget:
-  enabled: true
-  minAvailable: 1
-topologySpreadConstraints:
-  - maxSkew: 1
-    topologyKey: topology.kubernetes.io/zone
-    whenUnsatisfiable: ScheduleAnyway
-    labelSelector:
-      matchLabels:
-        app.kubernetes.io/name: metrics-server
+replicas: 1
 resources:
   requests: { cpu: 25m, memory: 64Mi }
   limits: { memory: 256Mi }
 metrics:
   enabled: true
 serviceMonitor:
-  enabled: false # enabled after kube-prometheus-stack installs the CRDs
+  enabled: true

@@ -3,7 +3,6 @@
 # Alertmanager). ingress-nginx calls its /oauth2/auth subrequest; unauthenticated
 # users get bounced to Keycloak and back.
 replicaCount: 1
-
 # Satisfies the require-ownership-labels policy.
 deploymentLabels:
   owner: platform-team
@@ -71,4 +70,4 @@ securityContext:
 metrics:
   enabled: true
   serviceMonitor:
-    enabled: false # flipped on by the post-install pass
+    enabled: true

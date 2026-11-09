@@ -14,7 +14,7 @@ routingMode: tunnel
 tunnelProtocol: vxlan
 
 operator:
-  replicas: 2
+  replicas: 1
   rollOutPods: true
   resources:
     requests: { cpu: 50m, memory: 128Mi }
@@ -22,7 +22,7 @@ operator:
   prometheus:
     enabled: true
     serviceMonitor:
-      enabled: false # flipped on after the Prometheus CRDs exist
+      enabled: true
 
 rollOutCiliumPods: true
 
@@ -43,7 +43,7 @@ hubble:
       - icmp
       - httpV2:exemplars=true;labelsContext=source_ip\,source_namespace\,source_workload\,destination_ip\,destination_namespace\,destination_workload\,traffic_direction
     serviceMonitor:
-      enabled: false
+      enabled: true
   relay:
     enabled: true
     rollOutPods: true
@@ -78,7 +78,7 @@ hubble:
 prometheus:
   enabled: true
   serviceMonitor:
-    enabled: false
+    enabled: true
 
 # Drop-in replacement for kube-proxy also means Cilium owns NodePort/hostPort.
 nodePort:

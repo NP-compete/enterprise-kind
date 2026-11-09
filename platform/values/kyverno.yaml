@@ -1,32 +1,56 @@
 ---
+# Image-signature verification means Kyverno itself must pull manifests from
+# the local registry. That registry is TLS-protected by the platform CA and
+# requires auth, so Kyverno needs both -- and it must address the registry by
+# its in-cluster name, because "localhost:5001" from a pod is the pod itself.
+global:
+  caCertificates:
+    data: |
+${PLATFORM_CA_PEM_INDENTED6}
+
+# Credentials for image verification pulls (--imagePullSecrets).
+existingImagePullSecrets:
+  - registry-creds
+
+# The admission controller is the one component whose loss is not degradation
+# but an outage: with failurePolicy=Fail and a single replica, the node it
+# happens to sit on going down stops every create/update in the cluster. Two
+# replicas on different nodes, everywhere.
+#
+# The chart's default anti-affinity is only `preferred`, which on a three-node
+# scheduler will happily stack both replicas on one node -- so it is replaced
+# with a required term below rather than left at the default.
 admissionController:
   replicas: 1
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits: { memory: 1Gi }
   serviceMonitor:
-    enabled: false
+    enabled: true
+
+# The remaining three are leader-elected: the standby does nothing until the
+# leader's lease expires, so a second replica buys failover, not throughput.
 backgroundController:
   replicas: 1
   resources:
     requests: { cpu: 50m, memory: 128Mi }
     limits: { memory: 512Mi }
   serviceMonitor:
-    enabled: false
+    enabled: true
 cleanupController:
   replicas: 1
   resources:
     requests: { cpu: 20m, memory: 64Mi }
     limits: { memory: 256Mi }
   serviceMonitor:
-    enabled: false
+    enabled: true
 reportsController:
   replicas: 1
   resources:
     requests: { cpu: 50m, memory: 192Mi }
     limits: { memory: 1Gi }
   serviceMonitor:
-    enabled: false
+    enabled: true
 
 config:
   # Never let a policy webhook stand between you and the platform itself.

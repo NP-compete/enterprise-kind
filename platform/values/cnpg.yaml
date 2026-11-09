@@ -1,0 +1,12 @@
+---
+# The CloudNativePG operator. It is not in the data path -- Postgres keeps
+# serving if the operator is down -- but it is what performs failover, so an
+# operator that is unavailable at the same moment the primary dies means no
+# promotion happens. Two replicas, leader-elected.
+replicaCount: 1
+resources:
+  requests: { cpu: 50m, memory: 128Mi }
+  limits: { memory: 512Mi }
+
+monitoring:
+  podMonitorEnabled: true

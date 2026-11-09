@@ -64,7 +64,7 @@ server:
   metrics:
     enabled: true
     serviceMonitor:
-      enabled: false
+      enabled: true
 
 controller:
   replicas: 1
@@ -74,7 +74,7 @@ controller:
   metrics:
     enabled: true
     serviceMonitor:
-      enabled: false
+      enabled: true
 
 repoServer:
   replicas: 1
@@ -84,7 +84,7 @@ repoServer:
   metrics:
     enabled: true
     serviceMonitor:
-      enabled: false
+      enabled: true
 
 applicationSet:
   replicas: 1
@@ -92,10 +92,16 @@ applicationSet:
     requests: { cpu: 20m, memory: 96Mi }
     limits: { memory: 384Mi }
 
+# Plain single-node Redis; redis-ha costs 6 extra pods to protect a cache.
+# Lose this and the UI errors until it restarts.
 redis:
+  enabled: true
   resources:
     requests: { cpu: 20m, memory: 64Mi }
     limits: { memory: 256Mi }
+
+redis-ha:
+  enabled: false
 
 notifications:
   enabled: false

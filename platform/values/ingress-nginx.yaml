@@ -1,6 +1,7 @@
 ---
 controller:
-  # DaemonSet pinned to the node that publishes 80/443 to the host.
+  # DaemonSet on the single worker, which is also the node publishing 80/443
+  # to the host.
   kind: DaemonSet
   hostPort:
     enabled: true
@@ -8,13 +9,10 @@ controller:
       http: 80
       https: 443
   service:
+    # MetalLB is not installed, so a LoadBalancer Service would sit <pending>.
     type: ClusterIP
   nodeSelector:
     ingress-ready: "true"
-  tolerations:
-    - key: node-role.kubernetes.io/control-plane
-      operator: Equal
-      effect: NoSchedule
   watchIngressWithoutClass: true
   ingressClassResource:
     name: nginx
@@ -45,7 +43,7 @@ controller:
   metrics:
     enabled: true
     serviceMonitor:
-      enabled: false # flipped on after kube-prometheus-stack installs the CRDs
+      enabled: true
   resources:
     requests: { cpu: 100m, memory: 192Mi }
     limits: { memory: 768Mi }
@@ -55,6 +53,7 @@ controller:
       enabled: true
 defaultBackend:
   enabled: true
+  replicaCount: 1
   resources:
     requests: { cpu: 10m, memory: 24Mi }
     limits: { memory: 64Mi }

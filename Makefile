@@ -2,9 +2,9 @@ SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
 S := ./scripts
 
-.PHONY: help create delete up install all down clean status urls smoke token trust-ca untrust-ca \
+.PHONY: help create delete up install all down clean reset status urls smoke token trust-ca untrust-ca \
         demo demo-load demo-down logs dashboards reinstall gitops-bootstrap push k9s \
-        hosts unhosts break-glass seal restore-drill
+        hosts unhosts break-glass seal restore-drill sign lint failover-drill doctor _sudo
 
 help: ## Show this help
 	@awk 'BEGIN{FS=":.*##"; printf "\n\033[1mkind production platform\033[0m\n\n"} \
@@ -13,67 +13,99 @@ help: ## Show this help
 	@echo
 
 ##@ Lifecycle
-create: up install trust-ca smoke ## Build the whole platform from nothing, trust its CA, and verify it
+# Ask for sudo once, up front, rather than ambushing an unattended build
+# with a password prompt fifteen minutes in -- which is what `trust-ca` did.
+# `hosts` and `trust-ca` are the only targets that need it.
+#
+# Refuses fast without a TTY instead of hanging forever on a prompt nobody
+# can answer: `make up && make install && make smoke` is the unattended path.
+_sudo:
+	@if [ ! -t 0 ]; then \
+	  echo "  'make all' needs sudo for 'hosts' and 'trust-ca' and there is no terminal."; \
+	  echo "  Unattended, run:  make up && make install && make smoke"; \
+	  exit 1; \
+	fi
+	@echo "  sudo is needed once, for /etc/hosts and the macOS keychain."
+	@sudo -v
+
+create: _sudo hosts up install trust-ca smoke ## Build everything from nothing: cluster, platform, host wiring, verification
 delete: clean ## Destroy the cluster, the registry and all build artifacts
 all: create ## Alias for `make create`
 up: ## Create the kind cluster and local registry
-	@$(S)/cluster-up.sh
+	@$(S)/cluster.sh up
 install: ## Install/upgrade the whole platform (idempotent)
 	@$(S)/platform-install.sh
 reinstall: ## Re-run the platform install after editing platform/
 	@$(S)/platform-install.sh
 down: ## Delete the cluster (registry and images survive)
-	@$(S)/cluster-down.sh
-clean: ## Delete the cluster, the registry and all build artifacts
-	@$(S)/cluster-down.sh --all
+	@$(S)/cluster.sh down
+clean: ## Delete the cluster, the registry and build artifacts (.secrets/ is kept)
+	@$(S)/cluster.sh down --all
+	@echo "  .secrets/ kept -- the CA, etcd key and passwords survive. 'make reset' wipes them too."
+reset: ## Delete everything INCLUDING .secrets/, for a genuinely fresh start
+	@printf '  This deletes .secrets/: the root CA, the etcd encryption key,\n'
+	@printf '  Vault unseal keys and every generated password. Type yes to confirm: '
+	@read -r a && [ "$$a" = yes ] || { echo "  aborted"; exit 1; }
+	@$(S)/cluster.sh down --all
+	@rm -rf .secrets
+	@echo "  gone. 'make all' rebuilds from nothing."
+doctor: ## Diagnose a broken cluster and print the fix for each problem
+	@$(S)/ops.sh doctor
 
 ##@ Operate
 status: ## Health summary of the cluster and platform
-	@$(S)/status.sh
+	@$(S)/ops.sh status
 urls: ## Print console URLs and credentials
-	@$(S)/urls.sh
+	@$(S)/ops.sh urls
 smoke: ## Run the end-to-end verification suite
-	@$(S)/smoke-test.sh
+	@$(S)/verify.sh smoke
 restore-drill: ## Prove backups restore: back up, destroy, restore, verify
-	@$(S)/restore-drill.sh
+	@$(S)/verify.sh restore
+failover-drill: ## Prove HA: cordon+drain a worker, check every component survives
+	@$(S)/verify.sh failover
+lint: ## Static checks, no cluster needed (ONLY=charts|manifests|shell|versions)
+	@$(S)/lint.sh
 token: ## Mint a Headlamp login token (ROLE=admin|viewer)
-	@$(S)/token.sh $(or $(ROLE),admin)
+	@$(S)/ops.sh token $(or $(ROLE),admin)
 k9s: ## Open k9s against this cluster
 	@k9s --context kind-$(or $(CLUSTER_NAME),kindprod)
 logs: ## Tail platform logs (NS=observability)
 	@kubectl --context kind-$(or $(CLUSTER_NAME),kindprod) -n $(or $(NS),observability) logs -l app.kubernetes.io/instance --all-containers --tail=100 -f
 
 ##@ Secrets
-seal: ## Encrypt a Secret from stdin so it can be committed (see scripts/seal.sh)
-	@$(S)/seal.sh
+seal: ## Encrypt a Secret from stdin so it can be committed (see scripts/ops.sh seal)
+	@$(S)/ops.sh seal
 
 ##@ Identity
 break-glass: ## Emergency: re-enable local logins when Keycloak is down
-	@$(S)/break-glass.sh on
+	@$(S)/ops.sh break-glass on
 
 ##@ Host DNS
 hosts: ## Add the platform hostnames to /etc/hosts (needs sudo)
-	@$(S)/hosts.sh add
+	@$(S)/host-setup.sh hosts add
 unhosts: ## Remove the platform hostnames from /etc/hosts
-	@$(S)/hosts.sh remove
+	@$(S)/host-setup.sh hosts remove
 
 ##@ Certificates
 trust-ca: ## Trust the cluster CA in the macOS keychain
-	@$(S)/trust-ca.sh trust
+	@$(S)/host-setup.sh trust-ca trust
 untrust-ca: ## Remove the cluster CA from the keychain
-	@$(S)/trust-ca.sh untrust
+	@$(S)/host-setup.sh trust-ca untrust
 
 ##@ Workloads
 demo: ## Deploy the reference workload into the apps namespace
-	@$(S)/demo.sh apply
+	@$(S)/ops.sh demo apply
 demo-load: ## Generate 60s of traffic against the demo workload
-	@$(S)/demo.sh load
+	@$(S)/ops.sh demo load
 demo-down: ## Remove the reference workload
-	@$(S)/demo.sh delete
+	@$(S)/ops.sh demo delete
+sign: ## Sign an image so Kyverno will admit it (IMG=name:tag)
+	@test -n "$(IMG)" || { echo "usage: make sign IMG=myapp:1.0"; exit 1; }
+	@$(S)/ops.sh sign $(IMG)
 push: ## Push a local image to the cluster registry (IMG=name:tag)
 	@test -n "$(IMG)" || { echo "usage: make push IMG=myapp:1.0"; exit 1; }
-	@$(S)/push.sh $(IMG)
+	@$(S)/ops.sh push $(IMG)
 
 ##@ GitOps
 gitops-bootstrap: ## Point Argo CD at a git repo (REPO=https://... [PATH=gitops])
-	@$(S)/gitops-bootstrap.sh
+	@$(S)/ops.sh gitops

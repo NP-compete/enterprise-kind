@@ -32,50 +32,5 @@ value: 1000
 globalDefault: false
 description: >-
   Application workloads. Evicted before any platform component.
----
-# Platform components that have no PodDisruptionBudget of their own. These stop
-# `kubectl drain` and node maintenance from taking the last replica away.
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: ingress-nginx
-  namespace: ingress-nginx
-spec:
-  minAvailable: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: ingress-nginx
-      app.kubernetes.io/component: controller
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: keycloak
-  namespace: identity
-spec:
-  maxUnavailable: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: keycloak
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: oauth2-proxy
-  namespace: identity
-spec:
-  maxUnavailable: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: oauth2-proxy
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: object-store
-  namespace: storage
-spec:
-  maxUnavailable: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: object-store
+
+# PodDisruptionBudgets live in pdbs.yaml, not here.

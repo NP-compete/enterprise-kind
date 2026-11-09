@@ -1,7 +1,12 @@
 ---
-# Production-shaped kind cluster.
-#   - 3 control-plane nodes (real etcd quorum) behind kind's HAProxy
-#   - 3 workers spread over 3 synthetic zones
+# Minimal kind cluster: 1 control plane + 1 worker.
+#
+# Each apiserver holds ~2 GiB of watch cache over every object and CRD, so
+# node count dominates this cluster's memory. One control plane therefore
+# means no etcd quorum: nothing here survives a node loss. Deliberate.
+#
+#   - 1 control-plane node (NO etcd quorum) behind kind's HAProxy
+#   - 1 worker, which also fronts ingress and publishes 80/443
 #   - Secrets encrypted at rest in etcd
 #   - OIDC (Keycloak) configured at kubeadm time, not patched in afterwards
 #   - API audit logging, PodSecurity admission
@@ -86,49 +91,24 @@ kubeadmConfigPatches:
     metricsBindAddress: 0.0.0.0:10249
 
 nodes:
-  # ---- control plane (etcd quorum of 3) ----
+  # ---- control plane (single member: no quorum) ----
   - role: control-plane
     image: ${NODE_IMAGE}
-    extraMounts: &cp_mounts
+    extraMounts:
       - hostPath: ${POLICY_DIR}
         containerPath: /etc/kubernetes/policies
         readOnly: true
-    kubeadmConfigPatches: &cp_labels
+    kubeadmConfigPatches:
       - |
         kind: InitConfiguration
         nodeRegistration:
           kubeletExtraArgs:
             - name: node-labels
               value: "topology.kubernetes.io/region=kind-local,topology.kubernetes.io/zone=zone-a,workload=control-plane"
-      - |
-        kind: JoinConfiguration
-        nodeRegistration:
-          kubeletExtraArgs:
-            - name: node-labels
-              value: "topology.kubernetes.io/region=kind-local,topology.kubernetes.io/zone=zone-a,workload=control-plane"
-  - role: control-plane
-    image: ${NODE_IMAGE}
-    extraMounts: *cp_mounts
-    kubeadmConfigPatches:
-      - |
-        kind: JoinConfiguration
-        nodeRegistration:
-          kubeletExtraArgs:
-            - name: node-labels
-              value: "topology.kubernetes.io/region=kind-local,topology.kubernetes.io/zone=zone-b,workload=control-plane"
-  - role: control-plane
-    image: ${NODE_IMAGE}
-    extraMounts: *cp_mounts
-    kubeadmConfigPatches:
-      - |
-        kind: JoinConfiguration
-        nodeRegistration:
-          kubeletExtraArgs:
-            - name: node-labels
-              value: "topology.kubernetes.io/region=kind-local,topology.kubernetes.io/zone=zone-c,workload=control-plane"
 
-  # ---- workers ----
-  # Worker A also fronts ingress and publishes 80/443 to the host.
+  # ---- worker ----
+  # Keeps its taint-free status as the only schedulable node, fronts ingress,
+  # and publishes 80/443 to the host.
   - role: worker
     image: ${NODE_IMAGE}
     kubeadmConfigPatches:
@@ -145,21 +125,3 @@ nodes:
       - containerPort: 443
         hostPort: ${HTTPS_PORT}
         protocol: TCP
-  - role: worker
-    image: ${NODE_IMAGE}
-    kubeadmConfigPatches:
-      - |
-        kind: JoinConfiguration
-        nodeRegistration:
-          kubeletExtraArgs:
-            - name: node-labels
-              value: "topology.kubernetes.io/region=kind-local,topology.kubernetes.io/zone=zone-b,workload=general"
-  - role: worker
-    image: ${NODE_IMAGE}
-    kubeadmConfigPatches:
-      - |
-        kind: JoinConfiguration
-        nodeRegistration:
-          kubeletExtraArgs:
-            - name: node-labels
-              value: "topology.kubernetes.io/region=kind-local,topology.kubernetes.io/zone=zone-c,workload=general"

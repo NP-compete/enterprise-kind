@@ -1,26 +1,31 @@
 # kind production platform
 
-A local Kubernetes platform built to production practice: HA control plane,
-encrypted secrets, enforced network and admission policy, single sign-on,
-observability, and backups that are tested rather than assumed.
+A local Kubernetes platform built to production practice: encrypted secrets,
+enforced network and admission policy, single sign-on, observability, and
+backups that are tested rather than assumed -- fitted into about 8 GiB.
+
+It is deliberately **not** highly available. One control plane, one worker,
+one replica of everything. The practices are production-shaped; the
+redundancy is not, and the trade is stated plainly under *Known limits*.
 
 Everything is in this folder. `make clean && make all` rebuilds it from nothing.
 
 ```
-make all             # cluster + platform + verification   (~20 min cold)
+make all             # everything: cluster, platform, host wiring, verification
+make doctor          # something broken? names the problem and prints the fix
 make urls            # consoles and credentials
-make smoke           # 56 end-to-end checks
-make restore-drill   # destroy a namespace and restore it, for real
-make clean           # delete everything
+make smoke           # 74 end-to-end checks
+make clean           # delete the cluster, keep .secrets/
+make reset           # delete everything including .secrets/
 ```
 
-First run also needs two commands that require your password, so they are not
-run for you:
+`make all` asks for your password once at the start — it needs sudo for
+`/etc/hosts` and the macOS keychain, and asking up front beats a prompt
+appearing fifteen minutes in. Unattended, use `make up && make install &&
+make smoke` and skip the host wiring.
 
-```
-make hosts      # maps *.kind.test to 127.0.0.1 in /etc/hosts
-make trust-ca   # trusts the cluster CA so browsers stop warning
-```
+Everything is idempotent. If a step fails, re-run the same command; it
+resumes rather than starting over, and tells you so.
 
 ## Consoles
 
@@ -31,19 +36,46 @@ Start at **https://home.kind.test** — it links everything and shows live healt
 | `home.kind.test` | Landing page with cluster stats |
 | `headlamp.kind.test` | Cluster management UI |
 | `argocd.kind.test` | GitOps |
-| `grafana.kind.test` | Metrics, logs, traces, 31 dashboards |
+| `grafana.kind.test` | Metrics, logs and dashboards (no traces: Tempo is not installed) |
 | `prometheus.kind.test` · `alertmanager.kind.test` | Raw PromQL, alert routing |
 | `keycloak.kind.test` | Identity provider |
 | `registry.kind.test` | Image registry UI |
 | `flows.kind.test` | Live pod-to-pod network flows |
 
-Every one is behind Keycloak SSO. Sign in with **`soham` / `soham`** (change it
-in `config.env`). Group membership decides access: `platform-admins` gets admin
-everywhere, `platform-viewers` read-only.
+Every one is behind Keycloak SSO. Passwords are generated on first install and
+printed by `make urls` — nothing in this repo ships a default credential. Pin
+one explicitly in `config.env` if you would rather have a memorable password
+than a secret one. Group membership decides access: `platform-admins` gets
+admin everywhere, `platform-viewers` read-only.
 
 ## What makes it production-shaped
 
-**Control plane** — 3 nodes with real etcd quorum, so losing one survives.
+**It runs in 7.4 GiB, measured.** An earlier revision was fully HA — 3
+control planes, 3 workers, two or three replicas of everything — and took
+22 GiB across 162 pods. This one is 61 pods. Both numbers are the sum of
+`kubectl top nodes`, taken on an idle cluster after `make smoke`.
+
+| | HA | now |
+|---|---|---|
+| kube-apiserver | 5.9 GiB (3 nodes) | 2.0 GiB (1 node) |
+| Prometheus | 2.3 GiB (×2, 15d, 30s) | 0.4 GiB (×1, 2d, 60s) |
+| Keycloak | 1.2 GiB (×2) | 0.4 GiB (×1, 384 MiB heap) |
+| Loki | 1.0 GiB (SimpleScalable, 7 pods) | 0.3 GiB (SingleBinary) |
+| MetalLB | 0.65 GiB (14 pods) | removed |
+| **total pod RSS** | **18.8 GiB** | **6.1 GiB** |
+
+The apiserver was 31% of all pod memory and nothing in the config hints at
+it: each instance keeps a watch cache over every object and every CRD, and
+this platform installs a lot of CRDs. **Collapsing the control plane to one
+node saved more than every replica reduction put together** — worth knowing
+before spending a day tuning replica counts.
+
+Everything is single-replica, so every PodDisruptionBudget is
+`maxUnavailable: 1`. A `minAvailable: 1` budget over a one-pod Deployment can
+never be satisfied during an eviction and leaves the node undrainable;
+`make smoke` asserts none have crept back in.
+
+**Control plane** — 1 node, so no etcd quorum and no tolerance for losing it.
 Secrets are encrypted at rest with AES-CBC; the smoke suite writes a canary
 Secret and greps raw etcd to prove the plaintext is absent. API audit logging
 is on and the audit trail is queryable in Grafana.
@@ -62,8 +94,8 @@ the policy, and confirms the connection then times out.
 tags, hardened security contexts, and no workloads in `default`. Platform
 namespaces are excluded by label, so new components are covered automatically.
 
-**Durability** — S3-compatible object storage holds Loki chunks, Tempo traces
-and Velero backups, so observability data outlives the node it ran on. Velero
+**Durability** — S3-compatible object storage holds Loki chunks and Velero
+backups, so observability data outlives the node it ran on. Velero
 runs daily and hourly schedules; etcd snapshots every 6 hours into a separate
 bucket. `make restore-drill` proves the whole path.
 
@@ -73,6 +105,7 @@ get `401`. Sealed Secrets lets secrets be committed to git in encrypted form.
 ## Layout
 
 ```
+.github/workflows/ci.yml  gates chart bumps; no cluster needed
 config.env                every tunable: ports, domain, versions, credentials
 Makefile                  the only interface you need
 cluster/                  node topology, audit policy, admission + OIDC config
@@ -81,7 +114,15 @@ platform/manifests/       namespaces, policies, portal, backups, object store
 platform/dashboards/      custom Grafana dashboards
 apps/podinfo/             reference workload (not deployed; `make demo`)
 gitops/                   Argo CD app-of-apps
-scripts/                  what the Makefile calls
+scripts/                  10 files, subcommand-dispatched:
+  cluster.sh              preflight|pki|authn|registry|dns|up|down
+  identity.sh             keycloak|apiserver|vault
+  platform-install.sh     everything on top of the cluster
+  ops.sh                  urls|status|token|seal|break-glass|demo|gitops|push|sign
+  verify.sh               smoke|restore|failover
+  host-setup.sh           hosts|trust-ca   (the only things touching your Mac)
+  lint.sh                 static checks, no cluster
+  lib.sh                  shared helpers
 docs/disaster-recovery.md restore procedures and their limits
 .secrets/                 generated keys and passwords (gitignored)
 ```
@@ -90,11 +131,18 @@ docs/disaster-recovery.md restore procedures and their limits
 
 ```bash
 make push IMG=myapp:1.0          # build into the registry (logs in for you)
+make sign IMG=myapp:1.0          # cosign-sign it so Kyverno will admit it
 make seal < secret.yaml          # encrypt a Secret for git
 make token                       # Headlamp token, if SSO is broken
 make break-glass                 # re-enable local logins if Keycloak is down
 make status                      # health summary
+make lint                        # render every chart at its pinned version
 ```
+
+`make lint` is what CI runs, and it exists for one failure mode: bumping a
+chart version whose values keys moved. That renders fine on the old chart and
+fails at minute eighteen of a cold build on the new one. Rendering every
+chart against its pin catches it in seconds.
 
 Platform namespaces are labelled `platform.kind.local/component`. That label
 drives policy exclusions and CA distribution — remove it from a namespace and
@@ -106,17 +154,35 @@ These are real and mostly not fixable on one machine.
 
 - **One physical host.** Three control planes give you etcd quorum and survive
   a node container dying, but not the Mac dying. Everything stops together.
-- **Storage is not replicated.** The object store is a single replica on a
-  local-path volume, and it holds backups *and* logs *and* traces. If that
-  volume dies they go together.
+- **Storage is not replicated, and backups share the cluster's fate.** The
+  object store is a single replica on a local-path volume, and it holds
+  backups *and* logs. If that volume dies they go together. This
+  is the largest remaining gap: a real platform puts the backup target
+  somewhere the cluster cannot take with it.
 - **`.secrets/` is unrecoverable if lost.** It holds the CA key, the etcd
   encryption key and every password. Copy it somewhere encrypted — see
   `docs/disaster-recovery.md`.
-- **Memory is the binding constraint.** The podman VM OOM-killed every node
-  twice during development. PriorityClasses now control eviction order, but if
-  you add much more, raise the VM's allocation.
-- **No image signature verification.** cosign + Kyverno `ImageVerify` was
-  planned and is not done; the registry authenticates but does not attest.
+- **Memory is still the binding constraint**, just a smaller one. Budget
+  **≥4 CPU and ≥10 GiB** for the podman VM; preflight checks and warns.
+  Measured steady state is 7.4 GiB, so 10 GiB leaves useful headroom.
+  Note that kind nodes do not partition the VM — each advertises the whole
+  machine as allocatable, so the scheduler will never refuse a pod and the
+  failure mode is the OOM killer, not `Pending`.
+- **Nothing is redundant.** One replica of every component, on one worker,
+  against one etcd member. Any pod restart is a brief outage of that thing;
+  losing the worker is a total outage. CI enforces that nothing scales back
+  up, because doing so silently breaks the memory budget.
+- **Dropped to fit the budget:** MetalLB (so `type: LoadBalancer` stays
+  `<pending>` forever), Tempo (no tracing), trivy-operator (no image
+  scanning), KEDA (no event-driven autoscaling), and Argo CD's redis-ha.
+  Each is one commit away in git history.
+- **Prometheus keeps 2 days at a 60s scrape, with cAdvisor series off.**
+  Per-container metrics are gone; node and pod-level numbers still come from
+  kube-state-metrics. Raise `retention` and re-enable `cAdvisor` in
+  `platform/values/kube-prometheus-stack.yaml` if you need the detail, and
+  budget roughly +1 GiB.
+- **Keycloak runs with a hard 384 MiB heap.** Fine for interactive logins;
+  a load test will hit `OutOfMemoryError` before it hits anything else.
 - **GitOps is not bootstrapped.** Argo CD is installed and ready; point it at a
   repo with `make gitops-bootstrap REPO=...`.
 - **Cilium is impossible here.** Its datapath needs a BPF filesystem, which
@@ -128,6 +194,7 @@ These are real and mostly not fixable on one machine.
 ## Requirements
 
 macOS with podman (or Docker via `CONTAINER_ENGINE=docker`), kind, kubectl,
-helm, jq, openssl, envsubst. The podman VM wants ≥6 CPU and ≥12 GiB; preflight
+helm, jq, openssl, envsubst. `make lint` additionally wants kubeconform and
+shellcheck. The podman VM wants ≥4 CPU and ≥10 GiB; preflight
 checks and warns. It also sets two sysctls *inside the VM* — unprivileged port
 binding and kernel keyring limits — both needed for kind under rootless podman.

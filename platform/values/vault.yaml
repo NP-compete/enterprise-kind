@@ -17,6 +17,7 @@ injector:
 server:
   image:
     repository: hashicorp/vault
+
   standalone:
     enabled: true
     config: |
@@ -37,6 +38,8 @@ server:
     size: 2Gi
     storageClass: standard
 
+  # Single node: three anti-affine Vault pods cannot be placed on one worker.
+  # Raft HA costs only ~300 MiB if the cluster ever grows nodes again.
   ha:
     enabled: false
 

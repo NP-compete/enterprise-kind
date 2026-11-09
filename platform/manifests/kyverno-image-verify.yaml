@@ -1,0 +1,70 @@
+---
+# Only cosign-signed images may run in tenant namespaces.
+#
+# Scoped to the local registry on purpose: upstream images (Calico, Grafana,
+# Keycloak...) are not signed with our key, so a cluster-wide rule would block
+# the entire platform. The rule that matters is "anything *we* built and pushed
+# must be signed", which is what this expresses.
+#
+# The public key lives in the policy itself -- it is public by definition, and
+# keeping it here means the trust anchor is reviewable in git.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signatures
+  annotations:
+    policies.kyverno.io/title: Require cosign signatures on local images
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/severity: high
+spec:
+  validationFailureAction: Enforce
+  background: false
+  webhookTimeoutSeconds: 30
+  failurePolicy: Fail
+  rules:
+    - name: verify-local-registry-images
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system, kube-public, kube-node-lease, local-path-storage]
+          - resources:
+              namespaceSelector:
+                matchExpressions:
+                  - key: platform.kind.local/component
+                    operator: Exists
+      verifyImages:
+        - imageReferences:
+            - "localhost:${REGISTRY_HOST_PORT}/*"
+            - "${REGISTRY_NAME}:5000/*"
+          # No Rekor instance locally, so signature verification is key-based
+          # only; there is no transparency log to consult.
+          skipImageReferences: []
+          # Per-rule credentials. The global --imagePullSecrets flag did not
+          # apply here; this field is explicit about which secret (in the
+          # kyverno namespace) to use when pulling the manifest.
+          imageRegistryCredentials:
+            allowInsecureRegistry: false
+            secrets:
+              - registry-creds
+          mutateDigest: true
+          verifyDigest: true
+          required: true
+          attestors:
+            - count: 1
+              entries:
+                - keys:
+                    publicKeys: |-
+${COSIGN_PUBLIC_KEY_INDENTED}
+                    # Offline, key-based verification. Both transparency
+                    # logs must be disabled: rekor (signature log) and ctlog
+                    # (certificate log). Either one left on makes Kyverno
+                    # reach out to sigstore's public endpoints, which fails
+                    # closed and blocks every pod.
+                    rekor:
+                      ignoreTlog: true
+                    ctlog:
+                      ignoreSCT: true

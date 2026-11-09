@@ -1,0 +1,116 @@
+---
+# PodDisruptionBudgets for components defined as raw manifests here; charts
+# set their own.
+#
+# All `maxUnavailable: 1`, never `minAvailable: 1`: at one replica a budget
+# demanding one healthy pod can never be satisfied during an eviction, and
+# `kubectl drain` blocks forever. A PDB does nothing for a crashed node
+# anyway -- what it buys here is ordering, one eviction at a time.
+#
+# Never name a budget the same as one a chart creates: kubectl apply merges
+# into the existing object, producing both minAvailable and maxUnavailable,
+# which the API server rejects. `make lint` checks for this.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ingress-nginx-controller
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    owner: platform-team
+spec:
+  # The controller is a DaemonSet, which the chart's PDB values do not cover.
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ingress-nginx
+      app.kubernetes.io/component: controller
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: portal
+  namespace: portal
+  labels:
+    app.kubernetes.io/name: portal
+    owner: platform-team
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: portal
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: registry-ui
+  namespace: registry
+  labels:
+    app.kubernetes.io/name: registry-ui
+    owner: platform-team
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: registry-ui
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: alert-sink
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: alert-sink
+    owner: platform-team
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alert-sink
+---
+# Prometheus and Alertmanager are created by the prometheus-operator from
+# CRs, not by the chart's own templates, so the chart has no PDB values to
+# set and they have to be written out here.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: prometheus
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: prometheus
+    owner: platform-team
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+      prometheus: kps-prometheus
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: alertmanager
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: alertmanager
+    owner: platform-team
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alertmanager
+      alertmanager: kps-alertmanager
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: object-store
+  namespace: storage
+  labels:
+    app.kubernetes.io/name: object-store
+    owner: platform-team
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: object-store
