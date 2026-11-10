@@ -19,7 +19,12 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods/exec"]
-    verbs: ["create"]
+    # Both verbs. The Python client calls connect_get_namespaced_pod_exec,
+    # which issues a GET before upgrading to a websocket, so `create` alone
+    # fails with "cannot get resource pods/exec" -- kubectl's own exec uses
+    # POST, which is why `auth can-i create pods --subresource=exec` says
+    # yes while the client is still refused.
+    verbs: ["create", "get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
