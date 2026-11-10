@@ -69,6 +69,9 @@ data:
       Consoles:
         style: row
         columns: 3
+      Agents:
+        style: row
+        columns: 2
       Observability:
         style: row
         columns: 3
@@ -118,6 +121,18 @@ data:
             siteMonitor: https://grafana.${BASE_DOMAIN}${URL_SUFFIX}
             description: Dashboards over metrics, logs and traces
             icon: grafana.png
+
+    - Agents:
+        - Agent UI:
+            href: https://agent-ui.${BASE_DOMAIN}${URL_SUFFIX}
+            siteMonitor: https://agent-ui.${BASE_DOMAIN}${URL_SUFFIX}
+            description: Red Hat template-ui -- chat against the agent
+            icon: mdi-robot-happy
+        - Agent API:
+            href: https://agent.${BASE_DOMAIN}${URL_SUFFIX}
+            siteMonitor: https://agent.${BASE_DOMAIN}${URL_SUFFIX}/health
+            description: template-agent (LangGraph) -- needs VLLM_BASE_URL to answer
+            icon: mdi-api
 
     - Observability:
         - Prometheus:

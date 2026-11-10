@@ -53,6 +53,10 @@ spec:
               value: http://alloy.observability.svc.cluster.local:4318
             - name: OTEL_SERVICE_NAME
               value: podinfo
+          # The image has no ENTRYPOINT (Cmd=[./podinfo]), so `args` alone
+          # replaces the command and the container tries to exec
+          # "--port=9898". The command has to be stated explicitly.
+          command: ["./podinfo"]
           args:
             - --port=9898
             - --level=info
