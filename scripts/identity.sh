@@ -41,6 +41,8 @@ api() { curl_kc -H "Authorization: Bearer ${token}" "$@"; }
 # a client to a realm already in the database. Anything added to
 # keycloak-realm.json after the first install therefore has to be
 # reconciled here, or it silently never appears.
+scope_list() { api "${BASE}/admin/realms/${REALM}/client-scopes" | jq -r '.[] | "\(.name)=\(.id)"'; }
+
 ensure_client() { # ensure_client <clientId> <json>
   local cid="$1" body="$2" id
   id="$(api "${BASE}/admin/realms/${REALM}/clients?clientId=${cid}" | jq -r '.[0].id // empty')"
@@ -59,7 +61,25 @@ ensure_client() { # ensure_client <clientId> <json>
 # and forwards the access token, and the agent validates it. The audience
 # mapper matters -- the agent checks the JWT audience against its client id,
 # and Keycloak does not include it by default.
+# template-ui hardcodes its OIDC scope list in
+# src/server/plugins/auth.plugin.ts and asks for "session:role-any" and
+# "offline_access" alongside the usual three. Keycloak rejects the whole
+# authorize request with invalid_scope if either is missing from the
+# client, and the UI shows that as "Session Expired" -- the login never
+# even reaches a password prompt.
+ensure_scope() { # ensure_scope <name>
+  local name="$1"
+  scope_list | grep -q "^${name}=" && return 0
+  api -X POST -H 'Content-Type: application/json' \
+    "${BASE}/admin/realms/${REALM}/client-scopes" -d "$(jq -n --arg n "${name}" '{
+      name: $n, protocol: "openid-connect",
+      description: "Required by template-ui",
+      attributes: {"include.in.token.scope":"true","display.on.consent.screen":"false"}
+    }')" >/dev/null && ok "created client scope ${name}"
+}
+
 if [[ -s "${ROOT_DIR}/.secrets/oidc-secret-template-agent" ]]; then
+  ensure_scope "session:role-any"
   ensure_client template-agent "$(jq -n \
     --arg sec "$(cat "${ROOT_DIR}/.secrets/oidc-secret-template-agent")" \
     --arg url "https://agent-ui.${BASE_DOMAIN}${URL_SUFFIX}" '{
@@ -79,9 +99,23 @@ if [[ -s "${ROOT_DIR}/.secrets/oidc-secret-template-agent" ]]; then
       attributes: {"post.logout.redirect.uris": ($url + "/*"),
                    "frontchannel.logout.session.required":"true"}
     }')"
+
+  # Attach the two extra scopes. defaultClientScopes on the create call
+  # cannot reference a scope that did not exist yet, and offline_access is
+  # realm-builtin but is not attached to a client created with an explicit
+  # scope list -- both have to be bound by id afterwards.
+  ta_cid="$(api "${BASE}/admin/realms/${REALM}/clients?clientId=template-agent" | jq -r '.[0].id // empty')"
+  if [[ -n "${ta_cid}" ]]; then
+    for sc in "session:role-any" "offline_access"; do
+      sid="$(scope_list | awk -F= -v n="${sc}" '$1==n {print $2}')"
+      [[ -n "${sid}" ]] || { warn "client scope ${sc} not found"; continue; }
+      api -X PUT "${BASE}/admin/realms/${REALM}/clients/${ta_cid}/default-client-scopes/${sid}" \
+        >/dev/null 2>&1 || true
+    done
+    ok "template-agent client scopes attached (session:role-any, offline_access)"
+  fi
 fi
 
-scope_list() { api "${BASE}/admin/realms/${REALM}/client-scopes" | jq -r '.[] | "\(.name)=\(.id)"'; }
 
 # The `groups` scope is ours, so create it here rather than in the realm import.
 if ! scope_list | grep -q '^groups='; then

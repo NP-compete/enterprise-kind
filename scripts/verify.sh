@@ -173,6 +173,20 @@ if kubectl --context ${KUBECONTEXT} get namespace template-agent >/dev/null 2>&1
   check "agent reports healthy (db + langgraph)" bash -c \
     "kubectl --context ${KUBECONTEXT} get --raw '/api/v1/namespaces/template-agent/services/agent:5002/proxy/health' \
      | jq -e '.status==\"healthy\" and .database==\"connected\"'"
+  # Keycloak's discovery document must advertise HTTPS for the BACKCHANNEL
+  # endpoints too. With KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true it derives them
+  # from the incoming request, which arrives over plain HTTP from ingress --
+  # clients then get a 308 on the token call and fail with an unhelpful
+  # parse error. Every OIDC client that follows discovery is affected.
+  check "Keycloak advertises https for token and userinfo" bash -c \
+    "kubectl --context ${KUBECONTEXT} get --raw \
+       '/api/v1/namespaces/identity/services/keycloak-keycloakx-http:http/proxy/realms/platform/.well-known/openid-configuration' 2>/dev/null \
+     | jq -e '(.token_endpoint|startswith(\"https://\")) and (.userinfo_endpoint|startswith(\"https://\"))' >/dev/null \
+     || curl -s --max-time 15 https://keycloak.${BASE_DOMAIN}${suffix}/realms/platform/.well-known/openid-configuration \
+        | jq -e '(.token_endpoint|startswith(\"https://\")) and (.userinfo_endpoint|startswith(\"https://\"))'"
+  check "agent UI login redirects to Keycloak" bash -c \
+    "curl -s --max-time 15 -o /dev/null -w '%{redirect_url}' https://agent-ui.${BASE_DOMAIN}${suffix}/login \
+     | grep -q 'keycloak.${BASE_DOMAIN}.*client_id=template-agent'"
   check "agent UI served over platform TLS" bash -c \
     "test \"\$(curl -sk --max-time 15 --resolve agent-ui.${BASE_DOMAIN}:443:127.0.0.1 \
        -o /dev/null -w '%{http_code}' https://agent-ui.${BASE_DOMAIN}${suffix}/)\" = 200"

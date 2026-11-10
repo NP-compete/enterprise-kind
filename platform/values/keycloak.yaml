@@ -62,8 +62,16 @@ extraEnv: |
     value: https://keycloak.${BASE_DOMAIN}
   - name: KC_HOSTNAME_STRICT
     value: "false"
+  # MUST stay false. When true, Keycloak derives backchannel URLs from the
+  # incoming request -- and ingress-nginx terminates TLS, so the request
+  # reaches Keycloak over plain HTTP. The discovery document then advertises
+  # token_endpoint and userinfo_endpoint as http:// while issuer and
+  # authorization_endpoint stay https://. Clients that follow discovery get
+  # a 308 from ingress on the token call; OIDC libraries do not follow
+  # redirects on POST, so the exchange fails with an unhelpful parse error.
+  # false makes every advertised endpoint use KC_HOSTNAME.
   - name: KC_HOSTNAME_BACKCHANNEL_DYNAMIC
-    value: "true"
+    value: "false"
   # KC_HTTP_ENABLED / KC_HEALTH_ENABLED / KC_METRICS_ENABLED are set by the
   # chart from proxy.http.enabled / health.enabled / metrics.enabled -- setting
   # them here too produces duplicate env entries and a failed apply.
