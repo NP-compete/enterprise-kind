@@ -14,6 +14,15 @@ controller:
   nodeSelector:
     ingress-ready: "true"
   watchIngressWithoutClass: true
+  extraArgs:
+    # Needed by the OpenShell gateway, which terminates its own TLS, picks
+    # its certificate by SNI and speaks gRPC -- see
+    # platform/manifests/openshell-ingress.yaml. Off by default because it
+    # inserts a TCP listener ahead of the HTTPS server for every host:
+    # requests are routed on SNI before nginx looks at any HTTP detail.
+    # Hosts without the ssl-passthrough annotation are handed back to the
+    # normal terminating server and behave exactly as before.
+    enable-ssl-passthrough: "true"
   ingressClassResource:
     name: nginx
     default: true

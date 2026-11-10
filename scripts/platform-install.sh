@@ -470,6 +470,11 @@ done
 # policy like every other platform namespace. The sandbox namespace is NOT:
 # sandboxes are untrusted workloads and must be policed like tenants.
 kc label namespace openshell platform.kind.local/component=sandboxing --overwrite >/dev/null
+# The gateway validates Keycloak's JWTs, and Keycloak is served from the
+# platform CA. Without this ConfigMap the JWKS fetch fails TLS verification
+# and every authenticated request is rejected as an invalid token.
+kc -n openshell create configmap platform-ca --from-literal=ca.crt="${CA_PEM}" \
+  --dry-run=client -o yaml | kc apply -f - >/dev/null
 kc label namespace openshell-sandboxes \
   pod-security.kubernetes.io/enforce=baseline \
   pod-security.kubernetes.io/warn=restricted --overwrite >/dev/null
@@ -498,7 +503,8 @@ else
   warn "openshell-client-tls never appeared; sandboxes will fail to bootstrap"
 fi
 
-ok "openshell gateway ready (make openshell)"
+kc apply -f "$(render "${M}/openshell-ingress.yaml")" >/dev/null
+ok "openshell gateway ready at https://openshell.${BASE_DOMAIN} (make openshell)"
 
 kc apply -f "${M}/platform-quotas.yaml" >/dev/null
 kc apply -f "${M}/tenant-namespace.yaml" >/dev/null

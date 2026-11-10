@@ -174,11 +174,28 @@ check "agent-sandbox controller running" bash -c \
    && test \"\$(kubectl --context ${KUBECONTEXT} -n agent-sandbox-system get deploy --no-headers | wc -l | tr -d ' ')\" -ge 1"
 check "openshell gateway ready" bash -c \
   "test \"\$(kubectl --context ${KUBECONTEXT} -n openshell get statefulset openshell -o jsonpath='{.status.readyReplicas}')\" = 1"
-check "openshell client mTLS secret exists" bash -c \
-  "kubectl --context ${KUBECONTEXT} -n openshell get secret openshell-client-tls >/dev/null"
-check "gateway requires a client certificate" bash -c \
+# The gateway is exposed on its own hostname with TLS passed through, so
+# the certificate a client sees is the gateway's own, issued by the
+# platform CA for that name -- not an ingress-terminated one.
+check "openshell external certificate issued by the platform CA" bash -c \
+  "kubectl --context ${KUBECONTEXT} -n openshell get certificate openshell-server-external \
+     -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}' | grep -q True"
+check "openshell ingress passes TLS through" bash -c \
+  "test \"\$(kubectl --context ${KUBECONTEXT} -n openshell get ingress openshell \
+     -o jsonpath='{.metadata.annotations.nginx\\.ingress\\.kubernetes\\.io/ssl-passthrough}')\" = true"
+check "ingress-nginx has ssl-passthrough enabled" bash -c \
+  "kubectl --context ${KUBECONTEXT} -n ingress-nginx get daemonset ingress-nginx-controller \
+     -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -q enable-ssl-passthrough"
+# Exposing the gateway only moved authentication from a client certificate
+# to a bearer token. An unauthenticated call must still be refused.
+check "gateway rejects unauthenticated calls" bash -c \
   "! kubectl --context ${KUBECONTEXT} -n openshell exec statefulset/openshell -- \
      wget -q -O- --no-check-certificate https://127.0.0.1:8080/ 2>&1 | grep -qi 'welcome'"
+check "gateway validates Keycloak tokens" bash -c \
+  "kubectl --context ${KUBECONTEXT} -n openshell get configmap openshell-config -o yaml \
+     | grep -q 'issuer = \"https://keycloak.${BASE_DOMAIN}'"
+check "gateway trusts the CA Keycloak is served from" bash -c \
+  "kubectl --context ${KUBECONTEXT} -n openshell get configmap platform-ca >/dev/null"
 # OpenShell's whole isolation model rests on the CNI enforcing egress
 # policy. Kubernetes accepts NetworkPolicy objects regardless, so this
 # asserts enforcement rather than presence.

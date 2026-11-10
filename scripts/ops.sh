@@ -482,39 +482,47 @@ cmd_doctor() {
 }
 
 cmd_openshell() {
-  # Sets up local access to the OpenShell gateway: pulls the client mTLS
-  # bundle the chart generated, registers the gateway with the CLI if it is
-  # installed, and port-forwards.
+  # Registers the exposed gateway with the local CLI and logs in.
   #
-  # Port-forward rather than ingress on purpose: the gateway requires client
-  # certificates, and an ingress proxy cannot present one on your behalf.
-  # Exposing it properly means enableMtls=false plus OIDC against Keycloak.
-  local ns=openshell
-  local dir="${HOME}/.config/openshell/gateways/k8s/mtls"
+  # The gateway is reached through ingress on its own hostname rather than
+  # a port-forward: ingress-nginx passes the TLS connection through
+  # untouched, the gateway presents a platform-CA certificate for that
+  # hostname by SNI, and users authenticate to it with a Keycloak token.
+  # This is the kind equivalent of the pass-through Route in NVIDIA's
+  # OpenShift guide.
+  local ns=openshell name="${CLUSTER_NAME}"
+  local host="openshell.${BASE_DOMAIN}${URL_SUFFIX}"
   kc -n "${ns}" get statefulset openshell >/dev/null 2>&1 \
     || die "openshell is not installed -- run: make install"
+  kc -n "${ns}" get ingress openshell >/dev/null 2>&1 \
+    || die "the openshell ingress is missing -- run: make install"
 
-  log "fetching the client TLS bundle"
-  mkdir -p "${dir}"
-  local k
-  for k in ca.crt tls.crt tls.key; do
-    kc -n "${ns}" get secret openshell-client-tls -o "jsonpath={.data.${k//./\\.}}" \
-      | base64 -d > "${dir}/${k}" \
-      || die "could not read ${k} from secret openshell-client-tls"
-  done
-  chmod 600 "${dir}"/tls.key
-  ok "client bundle in ${dir}"
-
-  if command -v openshell >/dev/null 2>&1; then
-    openshell gateway add https://127.0.0.1:8080 --local --name k8s >/dev/null 2>&1 \
-      && ok "gateway 'k8s' registered with the openshell CLI" \
-      || warn "could not register the gateway; add it manually once the port-forward is up"
-  else
-    warn "the 'openshell' CLI is not installed; the port-forward below still works"
+  if ! getent hosts "openshell.${BASE_DOMAIN}" >/dev/null 2>&1 \
+     && ! grep -qE "[[:space:]]openshell\.${BASE_DOMAIN}([[:space:]]|$)" /etc/hosts 2>/dev/null; then
+    warn "openshell.${BASE_DOMAIN} does not resolve -- run: make hosts"
   fi
 
-  log "port-forwarding https://127.0.0.1:8080 (ctrl-c to stop)"
-  kc -n "${ns}" port-forward svc/openshell 8080:8080
+  if ! command -v openshell >/dev/null 2>&1; then
+    warn "the 'openshell' CLI is not installed. Install it, then run:"
+    echo "    openshell gateway add https://${host} --name ${name} \\"
+    echo "      --oidc-issuer https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/realms/platform \\"
+    echo "      --oidc-client-id openshell-cli"
+    echo "    openshell gateway login ${name}"
+    return 0
+  fi
+
+  # The gateway's certificate chains to the platform CA, so the CLI needs
+  # that CA trusted -- `make trust-ca` puts it in the macOS keychain, which
+  # is where a Go binary looks.
+  log "registering gateway '${name}' at https://${host}"
+  openshell gateway add "https://${host}" --name "${name}" \
+    --oidc-issuer "https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/realms/platform" \
+    --oidc-client-id openshell-cli >/dev/null 2>&1 \
+    || warn "could not register the gateway; it may already exist"
+
+  log "logging in (a browser window will open)"
+  openshell gateway login "${name}" || die "openshell login failed"
+  openshell status
 }
 
 cmd_agent_stack() {

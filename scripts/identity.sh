@@ -116,6 +116,63 @@ if [[ -s "${ROOT_DIR}/.secrets/oidc-secret-template-agent" ]]; then
   fi
 fi
 
+# --- OpenShell's CLI client and its RBAC roles ------------------------------
+# The gateway is exposed at https://openshell.${BASE_DOMAIN} with mTLS off,
+# so users authenticate with a bearer token from here instead of a client
+# certificate. Three pieces have to line up:
+#
+#   * a PUBLIC client -- the CLI runs on a laptop and cannot keep a secret,
+#     so it uses the authorization code flow with PKCE;
+#   * an audience mapper naming openshell-cli, because the gateway checks
+#     `aud` and Keycloak does not populate it by default (the same trap the
+#     agent hit);
+#   * realm roles, because the gateway's RBAC reads realm_access.roles.
+#     With both role names blank it would instead treat everyone who can
+#     log in as a Platform Admin.
+ensure_realm_role() { # ensure_realm_role <name> <description>
+  api "${BASE}/admin/realms/${REALM}/roles/$1" | jq -e '.name' >/dev/null 2>&1 && return 0
+  api -X POST -H 'Content-Type: application/json' "${BASE}/admin/realms/${REALM}/roles" \
+    -d "$(jq -n --arg n "$1" --arg d "$2" '{name:$n, description:$d}')" >/dev/null \
+    && ok "created realm role $1"
+}
+
+bind_role_to_group() { # bind_role_to_group <role> <group>
+  local role="$1" group="$2" gid rjson
+  gid="$(api "${BASE}/admin/realms/${REALM}/groups?search=${group}" \
+    | jq -r --arg g "${group}" '.[] | select(.name==$g) | .id' | head -1)"
+  [[ -n "${gid}" ]] || { warn "group ${group} not found; ${role} not bound"; return 0; }
+  rjson="$(api "${BASE}/admin/realms/${REALM}/roles/${role}" | jq -c '[{id,name}]')"
+  api -X POST -H 'Content-Type: application/json' \
+    "${BASE}/admin/realms/${REALM}/groups/${gid}/role-mappings/realm" -d "${rjson}" >/dev/null 2>&1 || true
+}
+
+ensure_realm_role openshell-admin "OpenShell Platform Admin"
+ensure_realm_role openshell-user  "OpenShell standard user"
+bind_role_to_group openshell-admin platform-admins
+bind_role_to_group openshell-user  platform-viewers
+
+# Redirect URIs: the CLI opens a browser and catches the code on a loopback
+# listener whose port it picks at runtime (RFC 8252), so the registered URI
+# has to be port-agnostic. The device flow is enabled as well, for a shell
+# with no browser to hand.
+ensure_client openshell-cli "$(jq -n '{
+  clientId: "openshell-cli", name: "OpenShell CLI", enabled: true,
+  protocol: "openid-connect", publicClient: true,
+  standardFlowEnabled: true, implicitFlowEnabled: false,
+  directAccessGrantsEnabled: false, serviceAccountsEnabled: false,
+  redirectUris: ["http://127.0.0.1:*", "http://localhost:*",
+                 "http://127.0.0.1/*", "http://localhost/*"],
+  webOrigins: [],
+  defaultClientScopes: ["acr","basic","email","profile","roles","web-origins","groups"],
+  protocolMappers: [{
+    name: "openshell-audience", protocol: "openid-connect",
+    protocolMapper: "oidc-audience-mapper",
+    config: {"included.client.audience":"openshell-cli",
+             "id.token.claim":"false","access.token.claim":"true"}}],
+  attributes: {"pkce.code.challenge.method":"S256",
+               "oauth2.device.authorization.grant.enabled":"true"}
+}')"
+
 
 # The `groups` scope is ours, so create it here rather than in the realm import.
 if ! scope_list | grep -q '^groups='; then

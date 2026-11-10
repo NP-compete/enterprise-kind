@@ -1,0 +1,43 @@
+---
+# Exposes the OpenShell gateway on a hostname, the kind equivalent of the
+# pass-through Route in NVIDIA's OpenShift guide.
+#
+# SSL passthrough, not ordinary TLS termination. Three reasons, any one of
+# which would be enough:
+#
+#   * The gateway terminates its own TLS and picks a certificate by SNI --
+#     the chart's internal one for in-cluster names, the platform-CA one
+#     for openshell.${BASE_DOMAIN}. A terminating proxy would hide the SNI
+#     and the gateway would answer with the wrong certificate.
+#   * It speaks gRPC. Passthrough keeps the connection a single untouched
+#     TCP stream, so HTTP/2 framing and streaming RPCs are not the proxy's
+#     problem.
+#   * ingress-nginx never sees plaintext, so exposing the gateway does not
+#     widen what a compromised ingress controller can read.
+#
+# Passthrough is off by default in ingress-nginx and is enabled for the
+# whole controller in platform/values/ingress-nginx.yaml. Routing is by
+# SNI, so the path rule below exists only to satisfy the Ingress schema.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: openshell
+  namespace: openshell
+  labels:
+    app.kubernetes.io/name: openshell
+    owner: platform-team
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: openshell.${BASE_DOMAIN}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: openshell
+                port:
+                  number: 8080

@@ -189,12 +189,15 @@ is a supervisor pod plus a workload pod, and the workload's egress rides
 back over the supervisor's session where policy decides what is allowed out.
 
 ```bash
-make openshell    # fetch the client mTLS bundle, register the CLI, port-forward
+make openshell    # register https://openshell.kind.test with the CLI and log in
 ```
 
 It is installed by `make install` along with the
 [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox) controller
-it depends on, and costs about 34 MiB.
+it depends on, and costs about 34 MiB. The full setup — namespaces, helm
+values and why each is set, the Keycloak client, the pass-through ingress
+and the rootless-podman limitation — is in
+[docs/openshell.md](docs/openshell.md).
 
 Three things worth knowing:
 
@@ -206,9 +209,12 @@ Three things worth knowing:
   which deliberately does *not* carry the platform exemption label every
   other platform namespace has — Kyverno applies to them in full. A smoke
   check asserts that label stays absent.
-- **No ingress.** The gateway requires client certificates and an ingress
-  proxy cannot present one, so access is via port-forward. Exposing it
-  properly means `server.tls.enableMtls=false` plus OIDC against Keycloak.
+- **Exposed on a hostname, authenticated by Keycloak.** `openshell.kind.test`
+  reaches the gateway through ingress-nginx with TLS *passed through*: the
+  gateway terminates its own TLS and selects a platform-CA certificate by
+  SNI, so nothing in the path sees plaintext. A proxy cannot present a
+  client certificate for a user, so mTLS is off and users present a bearer
+  token instead, with `platform-admins` mapped to the gateway's admin role.
 
 ## Known limits
 
