@@ -134,13 +134,21 @@ docs/disaster-recovery.md restore procedures and their limits
 
 ```bash
 make push IMG=myapp:1.0          # build into the registry (logs in for you)
-make sign IMG=myapp:1.0          # cosign-sign it so Kyverno will admit it
+make sign IMG=myapp:1.0          # cosign-sign an image (see note below)
 make seal < secret.yaml          # encrypt a Secret for git
 make token                       # Headlamp token, if SSO is broken
 make break-glass                 # re-enable local logins if Keycloak is down
 make status                      # health summary
 make lint                        # render every chart at its pinned version
 ```
+
+**Image signing is opt-in and off by default.** The Kyverno `ImageVerify`
+policy is only installed when `.secrets/cosign.pub` exists, which
+`make sign` creates on first use. Until then nothing verifies signatures,
+and even once enabled the policy matches only images pulled from the
+local registry (`localhost:5001/*`, `kind-registry:5000/*`). Images side-
+loaded into the nodes with `kind load` — which is how the agent stack is
+built — bypass it entirely, because the kubelet never pulls them.
 
 `make lint` is what CI runs, and it exists for one failure mode: bumping a
 chart version whose values keys moved. That renders fine on the old chart and
