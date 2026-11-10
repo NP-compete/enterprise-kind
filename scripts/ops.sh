@@ -252,7 +252,7 @@ envsubst '${GITOPS_REPO} ${GITOPS_PATH} ${GITOPS_REVISION}' \
   < "${ROOT_DIR}/gitops/root-app.yaml" > "${BUILD_DIR}/root-app.yaml"
 kc apply -f "${BUILD_DIR}/root-app.yaml"
 ok "Argo CD now reconciles ${GITOPS_REPO}:${GITOPS_REVISION}/${GITOPS_PATH}/apps"
-warn "child Applications under gitops/apps/ use \${GITOPS_REPO}; replace it with your repo URL before pushing"
+ok "child Applications under gitops/apps/ carry a literal repoURL"
 }
 
 cmd_push() {

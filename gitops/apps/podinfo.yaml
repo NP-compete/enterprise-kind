@@ -11,8 +11,10 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: ${GITOPS_REPO}
-    targetRevision: ${GITOPS_REVISION}
+    # Literal: Argo CD reads child Applications straight from git, where
+    # nothing expands ${GITOPS_REPO}. Only root-app.yaml is rendered locally.
+    repoURL: https://github.com/NP-compete/enterprise-kind.git
+    targetRevision: HEAD
     path: apps/podinfo
   destination:
     server: https://kubernetes.default.svc

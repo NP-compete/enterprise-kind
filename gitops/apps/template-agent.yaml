@@ -1,0 +1,39 @@
+---
+# The Red Hat template-agent + template-ui stack, reconciled by Argo CD.
+#
+# Argo owns the manifests; it cannot build the images. `make agent-stack
+# build` builds template-agent and template-ui and loads them into the
+# cluster's containerd, and this Application deploys what references them.
+# Without that step the pods sit in ErrImageNeverPull, which is honest:
+# locally-built images are not something GitOps can reconcile.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: template-agent
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    # Literal, not ${GITOPS_REPO}: only root-app.yaml is rendered locally by
+    # gitops-bootstrap. Child Applications are read straight from git by
+    # Argo CD, where nothing expands variables.
+    repoURL: https://github.com/NP-compete/enterprise-kind.git
+    targetRevision: HEAD
+    path: apps/template-agent
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: template-agent
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      # The namespace must stay a policed tenant: no platform exemption
+      # label, so Kyverno applies to these workloads in full.
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }
