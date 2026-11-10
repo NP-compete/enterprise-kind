@@ -594,6 +594,33 @@ cmd_agent_stack() {
       grep -q 'openshell_run_code' "${SRC}/template-agent/config/agent/PROMPT.md" \
         || die "could not add openshell_run_code to the PROMPT.md tools list"
     fi
+    # The stock persona is a fitness assistant whose routing sends anything
+    # non-health to "Out-of-scope -> Decline". The tool is wired and the
+    # capability manifest admits it, but the model still refuses -- so the
+    # prompt has to say code execution is in scope, or the tool is dead
+    # weight in the UI.
+    if ! grep -q 'Running code' "${SRC}/template-agent/config/agent/PROMPT.md"; then
+      cat >> "${SRC}/template-agent/config/agent/PROMPT.md" <<'PROMPTEOF'
+
+## Running code (in scope)
+
+You can execute code in a disposable, network-isolated sandbox using the
+`openshell_run_code` tool. This is IN SCOPE -- do not decline it as
+out-of-scope.
+
+Use it when the user asks you to run code, compute something
+programmatically, check a value, or inspect the sandbox environment.
+
+- Call `openshell_run_code` with `code` and `language` ("python", "bash").
+- Report the tool's output verbatim. Do not invent output you did not get.
+- Each call gets a fresh sandbox: nothing persists between calls, and the
+  sandbox has no network access and no cluster credentials.
+- If the tool returns an error, show it rather than guessing at a cause.
+PROMPTEOF
+      grep -q 'Running code' "${SRC}/template-agent/config/agent/PROMPT.md" \
+        || die "could not add the code-execution section to PROMPT.md"
+    fi
+
     cp "${ROOT_DIR}/apps/template-agent/patch/builtin_tools.py" \
        "${SRC}/template-agent/builtin_tools.py"
     "${CE}" build -q -t localhost/template-agent:local-config \
