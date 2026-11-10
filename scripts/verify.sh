@@ -109,12 +109,14 @@ K="kubectl --context ${KUBECONTEXT}"
 # memory budget, which is the failure this configuration actually has.
 check "exactly 1 control plane and 1 worker" bash -c \
   "test \"\$(${K} get nodes --no-headers | wc -l | tr -d ' ')\" = 2"
-# coredns is excluded: it is a Kubernetes default, not a platform component,
-# and two replicas of it cost ~40 MiB while making DNS survive a pod restart.
+# Platform components only. coredns is a Kubernetes default, and tenant
+# namespaces are where multi-replica workloads are the whole point --
+# podinfo runs three to demonstrate the HPA.
 check "no platform workload runs more than one replica" bash -c "
   over=\$(${K} get deploy,statefulset -A -o json | jq -r '
     [.items[] | select((.spec.replicas // 1) > 1)
       | select(.metadata.name != \"coredns\")
+      | select(.metadata.namespace | IN(\"apps\",\"template-agent\",\"openshell-sandboxes\") | not)
       | .metadata.namespace + \"/\" + .metadata.name] | .[]')
   test -z \"\$over\" || { echo \"scaled up: \$over\"; false; }"
 
@@ -136,8 +138,12 @@ check "Argo CD uses plain redis, not redis-ha" bash -c \
 
 # Budgets must be satisfiable. At one replica a minAvailable:1 budget never
 # is, and the node becomes permanently undrainable -- so assert the shape.
-check "no PodDisruptionBudget uses minAvailable" bash -c \
-  "test \"\$(${K} get pdb -A -o json | jq '[.items[] | select(.spec.minAvailable != null)] | length')\" = 0"
+# Platform budgets only: at one replica minAvailable can never be satisfied.
+# Tenant workloads with real replica counts may legitimately use it.
+check "no platform PodDisruptionBudget uses minAvailable" bash -c \
+  "test \"\$(${K} get pdb -A -o json | jq '[.items[]
+     | select(.metadata.namespace | IN(\"apps\",\"template-agent\") | not)
+     | select(.spec.minAvailable != null)] | length')\" = 0"
 check "every PodDisruptionBudget is satisfiable" bash -c \
   "test \"\$(${K} get pdb -A -o json | jq '[.items[] | select(.status.currentHealthy < .status.desiredHealthy)] | length')\" = 0"
 
@@ -187,9 +193,11 @@ if kubectl --context ${KUBECONTEXT} get namespace template-agent >/dev/null 2>&1
   check "agent UI login redirects to Keycloak" bash -c \
     "curl -s --max-time 15 -o /dev/null -w '%{redirect_url}' https://agent-ui.${BASE_DOMAIN}${suffix}/login \
      | grep -q 'keycloak.${BASE_DOMAIN}.*client_id=template-agent'"
-  check "agent UI served over platform TLS" bash -c \
+  # 302, not 200: SSO is enabled, so an unauthenticated request is sent to
+  # the login flow. A 200 here would mean the UI had become anonymous.
+  check "agent UI served over platform TLS, behind SSO" bash -c \
     "test \"\$(curl -sk --max-time 15 --resolve agent-ui.${BASE_DOMAIN}:443:127.0.0.1 \
-       -o /dev/null -w '%{http_code}' https://agent-ui.${BASE_DOMAIN}${suffix}/)\" = 200"
+       -o /dev/null -w '%{http_code}' https://agent-ui.${BASE_DOMAIN}${suffix}/)\" = 302"
   # The stack is a tenant: it must NOT carry the platform exemption label,
   # or Kyverno would stop policing third-party workloads.
   check "agent namespace is policed, not exempt" bash -c \
