@@ -167,13 +167,27 @@ if section manifests; then
   if command -v kubeconform >/dev/null 2>&1; then
     # CRD-backed kinds (Kyverno policies, the CNPG Cluster, MetalLB pools)
     # are not in the stock schema set; the community catalogue has them.
-    if kubeconform -strict -ignore-missing-schemas -kubernetes-version 1.37.0 \
+    # CRD-backed kinds are not in the stock schema set; the community
+    # catalogue has them. It is fetched over the network, so a DNS blip
+    # would otherwise fail the whole lint with "no such host" -- which says
+    # nothing about the manifests. Retry with built-in schemas only and warn,
+    # so a real schema violation still fails while an offline run does not.
+    if kc_out="$(kubeconform -strict -ignore-missing-schemas -kubernetes-version 1.37.0 \
          -schema-location default \
          -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
-         "${LINT_DIR}/manifests/"*.yaml; then
-      ok "manifests validate"
+         "${LINT_DIR}/manifests/"*.yaml 2>&1)"; then
+      ok "manifests validate (including CRD schemas)"
+    elif grep -qiE 'no such host|dial tcp|giving up after|connection refused' <<<"${kc_out}"; then
+      warn "CRD schema catalogue unreachable; validating against built-in schemas only"
+      if kubeconform -strict -ignore-missing-schemas -kubernetes-version 1.37.0 \
+           -schema-location default "${LINT_DIR}/manifests/"*.yaml; then
+        ok "manifests validate (CRD schemas skipped -- offline)"
+      else
+        fail "kubeconform rejected one or more manifests"
+      fi
     else
       fail "kubeconform rejected one or more manifests"
+      printf '%s\n' "${kc_out}" | head -20 | sed 's/^/      /' >&2
     fi
   elif python3 -c 'import yaml' 2>/dev/null; then
     warn "kubeconform not installed -- parsing YAML only, not validating schemas"
