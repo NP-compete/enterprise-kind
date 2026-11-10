@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Day-to-day operator commands. Read-only unless stated.
 #
-# Usage: ops.sh <doctor|urls|secrets|status|token|seal|break-glass|demo|gitops|push|sign|openshell|agent-stack> [args]
+# Usage: ops.sh <doctor|urls|secrets|status|token|seal|break-glass|demo|gitops|push|sign|openshell|agent-stack|agent-creds> [args]
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 cmd_urls() {
@@ -669,8 +669,51 @@ cmd_secrets() {
   printf '  %s\n\n' "'make reset' regenerates every one of them."
 }
 
+cmd_agent_creds() {
+  # Installs Google service account credentials for the agent's Vertex AI
+  # model, as a SealedSecret so the JSON is encrypted in git and only the
+  # cluster's sealed-secrets key can read it.
+  #
+  #   make agent-creds FILE=/path/to/service-account.json
+  local src="${FILE:-$1}"
+  [[ -n "${src}" ]] || die "usage: make agent-creds FILE=/path/to/service-account.json"
+  [[ -s "${src}" ]]  || die "no such file: ${src}"
+  jq -e '.type=="service_account" and has("project_id") and has("private_key")' "${src}" >/dev/null 2>&1 \
+    || die "${src} does not look like a Google service account key (expected type=service_account)"
+
+  local proj; proj="$(jq -r .project_id "${src}")"
+  cp "${src}" "${ROOT_DIR}/.secrets/google-credentials.json"
+  chmod 600 "${ROOT_DIR}/.secrets/google-credentials.json"
+  ok "stored credentials for project ${proj} in .secrets/"
+
+  kc get namespace template-agent >/dev/null 2>&1 \
+    || die "the agent stack is not deployed -- run: make agent-stack"
+
+  kc -n template-agent create secret generic agent-google-creds \
+    --from-file=credentials.json="${src}" --dry-run=client -o yaml \
+    > "${BUILD_DIR}/agent-google-creds.yaml"
+
+  # Sealed, so Argo CD applies it from git like everything else.
+  "${ROOT_DIR}/scripts/ops.sh" seal < "${BUILD_DIR}/agent-google-creds.yaml" \
+    > "${ROOT_DIR}/apps/template-agent/google-creds-sealedsecret.yaml" \
+    || die "could not seal the credentials"
+  rm -f "${BUILD_DIR}/agent-google-creds.yaml"
+
+  if ! grep -q 'google-creds-sealedsecret.yaml' "${ROOT_DIR}/apps/template-agent/kustomization.yaml"; then
+    sed -i '' 's|  - ui-sealedsecret.yaml|  - ui-sealedsecret.yaml\n  - google-creds-sealedsecret.yaml|' \
+      "${ROOT_DIR}/apps/template-agent/kustomization.yaml"
+  fi
+  ok "sealed into apps/template-agent/google-creds-sealedsecret.yaml"
+
+  kc apply -k "${ROOT_DIR}/apps/template-agent" >/dev/null
+  kc -n template-agent rollout restart deployment/agent >/dev/null
+  kc -n template-agent rollout status deployment/agent --timeout=300s >/dev/null \
+    && ok "agent restarted with Vertex AI credentials (project ${proj})"
+  warn "commit apps/template-agent/google-creds-sealedsecret.yaml -- it is encrypted, not plaintext"
+}
+
 _usage() {
-  echo "usage: $(basename "$0") <doctor|urls|secrets|status|token|seal|break-glass|demo|gitops|push|sign|openshell|agent-stack> [args]" >&2
+  echo "usage: $(basename "$0") <doctor|urls|secrets|status|token|seal|break-glass|demo|gitops|push|sign|openshell|agent-stack|agent-creds> [args]" >&2
   exit 2
 }
 [[ $# -ge 1 ]] || _usage
@@ -679,6 +722,7 @@ case "${_sub}" in
   doctor) cmd_doctor "$@" ;;
   openshell) cmd_openshell "$@" ;;
   agent-stack) cmd_agent_stack "$@" ;;
+  agent-creds) cmd_agent_creds "$@" ;;
   urls) cmd_urls "$@" ;;
   secrets) cmd_secrets "$@" ;;
   status) cmd_status "$@" ;;

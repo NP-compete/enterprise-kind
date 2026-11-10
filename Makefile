@@ -3,7 +3,7 @@ SHELL := /usr/bin/env bash
 S := ./scripts
 
 .PHONY: help create delete up install all down clean reset status urls secrets smoke token trust-ca untrust-ca \
-        demo demo-load demo-down logs dashboards reinstall gitops-bootstrap push k9s openshell agent-stack \
+        demo demo-load demo-down logs dashboards reinstall gitops-bootstrap push k9s openshell agent-stack agent-creds \
         hosts unhosts break-glass seal restore-drill sign lint failover-drill doctor _sudo
 
 help: ## Show this help
@@ -115,6 +115,9 @@ openshell: ## Fetch the OpenShell client mTLS bundle and port-forward the gatewa
 ##@ Workloads (continued)
 agent-stack: ## Build and deploy the Red Hat template-agent + template-ui stack
 	@$(S)/ops.sh agent-stack
+agent-creds: ## Install Google service account JSON for the agent (FILE=/path/to/key.json)
+	@test -n "$(FILE)" || { echo "usage: make agent-creds FILE=/path/to/service-account.json"; exit 1; }
+	@FILE=$(FILE) $(S)/ops.sh agent-creds
 
 ##@ GitOps
 gitops-bootstrap: ## Point Argo CD at a git repo (REPO=https://... [PATH=gitops])
