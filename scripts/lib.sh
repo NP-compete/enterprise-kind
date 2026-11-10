@@ -11,7 +11,7 @@ source "${ROOT_DIR}/config.env"
 
 export CLUSTER_NAME NODE_IMAGE HTTP_PORT HTTPS_PORT API_SERVER_PORT BASE_DOMAIN \
        REGISTRY_NAME REGISTRY_HOST_PORT CONTAINER_ENGINE NODE_IMAGE_ETCD PLATFORM_HOSTS SEALED_SECRETS_VERSION COSIGN_VERSION \
-       PG_INSTANCES CHART_OPENSHELL AGENT_SANDBOX_VERSION
+       PG_INSTANCES CHART_OPENSHELL AGENT_SANDBOX_VERSION AGENT_MODEL
 # Identity passwords are generated into .secrets/ on first install rather than
 # living in config.env. Resolve them here so every script -- urls, smoke
 # tests, keycloak-reconcile, demo -- sees the same value without each one

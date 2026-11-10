@@ -572,6 +572,16 @@ cmd_agent_stack() {
     # CONFIG_PATH but never copies config in, so the agent exits with
     # "Missing required config files". The tree is nested, which ConfigMap
     # keys cannot express, so bake it as a layer.
+    # The model is declared in PROMPT.md front matter, which is baked into
+    # the image -- so it is rewritten here from AGENT_MODEL rather than
+    # being a deploy-time env var.
+    step "setting the agent model to ${AGENT_MODEL}"
+    sed -i.bak -E "s|^model: .*|model: ${AGENT_MODEL}|" \
+      "${SRC}/template-agent/config/agent/PROMPT.md"
+    rm -f "${SRC}/template-agent/config/agent/PROMPT.md.bak"
+    grep -q "^model: ${AGENT_MODEL}$" "${SRC}/template-agent/config/agent/PROMPT.md" \
+      || die "could not set the model in PROMPT.md"
+
     step "baking the agent config layer"
     printf 'FROM localhost/template-agent:local\nCOPY --chown=65532:root config/agent /app/config/agent\n' \
       > "${SRC}/Containerfile.config"
