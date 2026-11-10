@@ -36,6 +36,51 @@ token="$(curl_kc -d client_id=admin-cli -d "username=${KEYCLOAK_ADMIN_USERNAME}"
 
 api() { curl_kc -H "Authorization: Bearer ${token}" "$@"; }
 
+# --- clients the realm import cannot add -----------------------------------
+# `--import-realm` only creates a realm that does not exist; it will not add
+# a client to a realm already in the database. Anything added to
+# keycloak-realm.json after the first install therefore has to be
+# reconciled here, or it silently never appears.
+ensure_client() { # ensure_client <clientId> <json>
+  local cid="$1" body="$2" id
+  id="$(api "${BASE}/admin/realms/${REALM}/clients?clientId=${cid}" | jq -r '.[0].id // empty')"
+  if [[ -z "${id}" ]]; then
+    api -X POST -H 'Content-Type: application/json' \
+      "${BASE}/admin/realms/${REALM}/clients" -d "${body}" >/dev/null \
+      && ok "created client ${cid}"
+  else
+    api -X PUT -H 'Content-Type: application/json' \
+      "${BASE}/admin/realms/${REALM}/clients/${id}" -d "${body}" >/dev/null \
+      && ok "updated client ${cid}"
+  fi
+}
+
+# The agent UI and the agent API share one client: the UI performs the login
+# and forwards the access token, and the agent validates it. The audience
+# mapper matters -- the agent checks the JWT audience against its client id,
+# and Keycloak does not include it by default.
+if [[ -s "${ROOT_DIR}/.secrets/oidc-secret-template-agent" ]]; then
+  ensure_client template-agent "$(jq -n \
+    --arg sec "$(cat "${ROOT_DIR}/.secrets/oidc-secret-template-agent")" \
+    --arg url "https://agent-ui.${BASE_DOMAIN}${URL_SUFFIX}" '{
+      clientId: "template-agent", name: "Agent UI", enabled: true,
+      protocol: "openid-connect", publicClient: false, secret: $sec,
+      standardFlowEnabled: true, implicitFlowEnabled: false,
+      directAccessGrantsEnabled: false, serviceAccountsEnabled: false,
+      rootUrl: $url, baseUrl: "/",
+      redirectUris: [($url + "/auth/callback/oidc"), ($url + "/*")],
+      webOrigins: [$url],
+      defaultClientScopes: ["acr","basic","email","profile","roles","web-origins","groups"],
+      protocolMappers: [{
+        name: "template-agent-audience", protocol: "openid-connect",
+        protocolMapper: "oidc-audience-mapper",
+        config: {"included.client.audience":"template-agent",
+                 "id.token.claim":"false","access.token.claim":"true"}}],
+      attributes: {"post.logout.redirect.uris": ($url + "/*"),
+                   "frontchannel.logout.session.required":"true"}
+    }')"
+fi
+
 scope_list() { api "${BASE}/admin/realms/${REALM}/client-scopes" | jq -r '.[] | "\(.name)=\(.id)"'; }
 
 # The `groups` scope is ours, so create it here rather than in the realm import.

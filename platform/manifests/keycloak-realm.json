@@ -17,13 +17,16 @@
   "ssoSessionIdleTimeout": 3600,
   "ssoSessionMaxLifespan": 36000,
   "offlineSessionIdleTimeout": 2592000,
-
   "groups": [
-    { "name": "platform-admins", "path": "/platform-admins" },
-    { "name": "platform-viewers", "path": "/platform-viewers" }
+    {
+      "name": "platform-admins",
+      "path": "/platform-admins"
+    },
+    {
+      "name": "platform-viewers",
+      "path": "/platform-viewers"
+    }
   ],
-
-
   "clients": [
     {
       "clientId": "grafana",
@@ -38,8 +41,12 @@
       "serviceAccountsEnabled": false,
       "rootUrl": "https://grafana.${BASE_DOMAIN}${URL_SUFFIX}",
       "baseUrl": "/",
-      "redirectUris": ["https://grafana.${BASE_DOMAIN}${URL_SUFFIX}/login/generic_oauth"],
-      "webOrigins": ["https://grafana.${BASE_DOMAIN}${URL_SUFFIX}"],
+      "redirectUris": [
+        "https://grafana.${BASE_DOMAIN}${URL_SUFFIX}/login/generic_oauth"
+      ],
+      "webOrigins": [
+        "https://grafana.${BASE_DOMAIN}${URL_SUFFIX}"
+      ],
       "attributes": {
         "post.logout.redirect.uris": "https://grafana.${BASE_DOMAIN}${URL_SUFFIX}/*",
         "frontchannel.logout.session.required": "true"
@@ -61,7 +68,9 @@
         "https://argocd.${BASE_DOMAIN}${URL_SUFFIX}/auth/callback",
         "http://localhost:8085/auth/callback"
       ],
-      "webOrigins": ["https://argocd.${BASE_DOMAIN}${URL_SUFFIX}"],
+      "webOrigins": [
+        "https://argocd.${BASE_DOMAIN}${URL_SUFFIX}"
+      ],
       "attributes": {
         "post.logout.redirect.uris": "https://argocd.${BASE_DOMAIN}${URL_SUFFIX}/*"
       }
@@ -78,8 +87,12 @@
       "directAccessGrantsEnabled": false,
       "rootUrl": "https://headlamp.${BASE_DOMAIN}${URL_SUFFIX}",
       "baseUrl": "/",
-      "redirectUris": ["https://headlamp.${BASE_DOMAIN}${URL_SUFFIX}/oidc-callback"],
-      "webOrigins": ["https://headlamp.${BASE_DOMAIN}${URL_SUFFIX}"],
+      "redirectUris": [
+        "https://headlamp.${BASE_DOMAIN}${URL_SUFFIX}/oidc-callback"
+      ],
+      "webOrigins": [
+        "https://headlamp.${BASE_DOMAIN}${URL_SUFFIX}"
+      ],
       "attributes": {
         "post.logout.redirect.uris": "https://headlamp.${BASE_DOMAIN}${URL_SUFFIX}/*"
       }
@@ -96,7 +109,9 @@
       "directAccessGrantsEnabled": false,
       "rootUrl": "https://auth.${BASE_DOMAIN}${URL_SUFFIX}",
       "baseUrl": "/",
-      "redirectUris": ["https://auth.${BASE_DOMAIN}${URL_SUFFIX}/oauth2/callback"],
+      "redirectUris": [
+        "https://auth.${BASE_DOMAIN}${URL_SUFFIX}/oauth2/callback"
+      ],
       "webOrigins": [
         "https://auth.${BASE_DOMAIN}${URL_SUFFIX}",
         "https://prometheus.${BASE_DOMAIN}${URL_SUFFIX}",
@@ -105,9 +120,45 @@
       "attributes": {
         "post.logout.redirect.uris": "https://*.${BASE_DOMAIN}${URL_SUFFIX}/*"
       }
+    },
+    {
+      "clientId": "template-agent",
+      "name": "Agent UI",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "${OIDC_SECRET_TEMPLATE_AGENT}",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "rootUrl": "https://agent-ui.${BASE_DOMAIN}${URL_SUFFIX}",
+      "baseUrl": "/",
+      "redirectUris": [
+        "https://agent-ui.${BASE_DOMAIN}${URL_SUFFIX}/auth/callback/oidc",
+        "https://agent-ui.${BASE_DOMAIN}${URL_SUFFIX}/*"
+      ],
+      "webOrigins": [
+        "https://agent-ui.${BASE_DOMAIN}${URL_SUFFIX}"
+      ],
+      "protocolMappers": [
+        {
+          "name": "template-agent-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "template-agent",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "https://agent-ui.${BASE_DOMAIN}${URL_SUFFIX}/*",
+        "frontchannel.logout.session.required": "true"
+      }
     }
   ],
-
   "users": [
     {
       "username": "${SSO_ADMIN_USERNAME}",
@@ -117,10 +168,18 @@
       "lastName": "Admin",
       "enabled": true,
       "credentials": [
-        { "type": "password", "value": "${SSO_ADMIN_PASSWORD}", "temporary": false }
+        {
+          "type": "password",
+          "value": "${SSO_ADMIN_PASSWORD}",
+          "temporary": false
+        }
       ],
-      "groups": ["/platform-admins"],
-      "realmRoles": ["default-roles-platform"]
+      "groups": [
+        "/platform-admins"
+      ],
+      "realmRoles": [
+        "default-roles-platform"
+      ]
     },
     {
       "username": "${SSO_VIEWER_USERNAME}",
@@ -130,10 +189,18 @@
       "lastName": "Viewer",
       "enabled": true,
       "credentials": [
-        { "type": "password", "value": "${SSO_VIEWER_PASSWORD}", "temporary": false }
+        {
+          "type": "password",
+          "value": "${SSO_VIEWER_PASSWORD}",
+          "temporary": false
+        }
       ],
-      "groups": ["/platform-viewers"],
-      "realmRoles": ["default-roles-platform"]
+      "groups": [
+        "/platform-viewers"
+      ],
+      "realmRoles": [
+        "default-roles-platform"
+      ]
     }
   ]
 }

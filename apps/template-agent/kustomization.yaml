@@ -198,3 +198,75 @@ patches:
                 resources:
                   requests: { cpu: 100m, memory: 512Mi }
                   limits: { cpu: "1", memory: 1Gi }
+
+  # --- SSO ------------------------------------------------------------------
+  # The agent defaults ENABLE_AUTH=true and rejects every request with 401
+  # when SSO is unset; the UI surfaces that as "Session Expired". Both sides
+  # are pointed at the platform's Keycloak realm. The client secret is NOT
+  # here -- it comes from the sealed ui-secrets Secret.
+  - target: { kind: Deployment, name: agent }
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: { name: agent }
+      spec:
+        template:
+          spec:
+            containers:
+              - name: agent
+                env:
+                  - name: ENABLE_AUTH
+                    value: "true"
+                  - name: SSO_ISSUER_URL
+                    value: https://keycloak.kind.test/realms/platform
+                  - name: SSO_CLIENT_ID
+                    value: template-agent
+                  - name: SSO_JWT_AUDIENCE
+                    value: template-agent
+                  - name: SSO_CLIENT_SECRET
+                    valueFrom:
+                      secretKeyRef: { name: ui-secrets, key: SSO_CLIENT_SECRET }
+                  # Keycloak serves a platform-CA certificate; without this
+                  # the agent's OIDC discovery fails TLS verification.
+                  - name: SSL_CERT_FILE
+                    value: /etc/platform-ca/ca.crt
+                  - name: REQUESTS_CA_BUNDLE
+                    value: /etc/platform-ca/ca.crt
+                volumeMounts:
+                  - name: platform-ca
+                    mountPath: /etc/platform-ca
+                    readOnly: true
+            volumes:
+              - name: platform-ca
+                configMap: { name: platform-ca }
+  - target: { kind: Deployment, name: ui }
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: { name: ui }
+      spec:
+        template:
+          spec:
+            containers:
+              - name: ui
+                env:
+                  - name: AUTH_ENABLED
+                    value: "true"
+                  - name: SSO_ISSUER_HOST
+                    value: https://keycloak.kind.test/realms/platform
+                  - name: SSO_CLIENT_ID
+                    value: template-agent
+                  - name: SSO_CALLBACK_URL
+                    value: https://agent-ui.kind.test/auth/callback/oidc
+                  - name: SSO_CLIENT_SECRET
+                    valueFrom:
+                      secretKeyRef: { name: ui-secrets, key: SSO_CLIENT_SECRET }
+                  - name: NODE_EXTRA_CA_CERTS
+                    value: /etc/platform-ca/ca.crt
+                volumeMounts:
+                  - name: platform-ca
+                    mountPath: /etc/platform-ca
+                    readOnly: true
+            volumes:
+              - name: platform-ca
+                configMap: { name: platform-ca }
