@@ -2,7 +2,7 @@ SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
 S := ./scripts
 
-.PHONY: help create delete up install all down clean reset status urls smoke token trust-ca untrust-ca \
+.PHONY: help create delete up install all down clean reset status urls secrets smoke token trust-ca untrust-ca \
         demo demo-load demo-down logs dashboards reinstall gitops-bootstrap push k9s openshell agent-stack \
         hosts unhosts break-glass seal restore-drill sign lint failover-drill doctor _sudo
 
@@ -55,8 +55,10 @@ doctor: ## Diagnose a broken cluster and print the fix for each problem
 ##@ Operate
 status: ## Health summary of the cluster and platform
 	@$(S)/ops.sh status
-urls: ## Print console URLs and credentials
+urls: ## Print console URLs and the logins you need
 	@$(S)/ops.sh urls
+secrets: ## Print every generated credential
+	@$(S)/ops.sh secrets
 smoke: ## Run the end-to-end verification suite
 	@$(S)/verify.sh smoke
 restore-drill: ## Prove backups restore: back up, destroy, restore, verify

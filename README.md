@@ -13,7 +13,8 @@ Everything is in this folder. `make clean && make all` rebuilds it from nothing.
 ```
 make all             # everything: cluster, platform, host wiring, verification
 make doctor          # something broken? names the problem and prints the fix
-make urls            # consoles and credentials
+make urls            # consoles and the logins you need
+make secrets         # every generated credential
 make smoke           # 80 end-to-end checks
 make clean           # delete the cluster, keep .secrets/
 make reset           # delete everything including .secrets/

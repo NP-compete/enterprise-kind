@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Day-to-day operator commands. Read-only unless stated.
 #
-# Usage: ops.sh <doctor|urls|status|token|seal|break-glass|demo|gitops|push|sign|openshell|agent-stack> [args]
+# Usage: ops.sh <doctor|urls|secrets|status|token|seal|break-glass|demo|gitops|push|sign|openshell|agent-stack> [args]
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 cmd_urls() {
@@ -613,8 +613,64 @@ cmd_agent_stack() {
   fi
 }
 
+cmd_secrets() {
+  # Every credential this platform generated, in one place. `urls` prints the
+  # handful you need to log in; this prints all of them, including the ones
+  # that only matter when something is broken.
+  #
+  # Values come from .secrets/ (generated at install, gitignored) and from
+  # the cluster for anything a chart minted itself.
+  local S="${ROOT_DIR}/.secrets"
+  _f()  { [[ -s "${S}/$1" ]] && cat "${S}/$1" || echo "(not generated)"; }
+  _k()  { kc -n "$1" get secret "$2" -o "jsonpath={.data.$3}" 2>/dev/null | base64 -d 2>/dev/null; }
+  _row(){ printf '  %-30s %-42s %s\n' "$1" "$2" "$3"; }
+  _hdr(){ printf '\n%s\n' "$(_c '1;34' "$1")"; }
+
+  printf '\n%s\n' "$(_c '1;33' 'These are live credentials. They are printed in full below.')"
+
+  _hdr 'single sign-on (Keycloak -- use these for every console)'
+  _row "${SSO_ADMIN_USERNAME}"  "$(_f sso-admin-password)"  "group: platform-admins"
+  _row "${SSO_VIEWER_USERNAME}" "$(_f sso-viewer-password)" "group: platform-viewers"
+
+  _hdr 'break-glass (local logins, only when SSO is down -- make break-glass)'
+  _row "keycloak admin console" "$(_f keycloak-admin-password)" "user: ${KEYCLOAK_ADMIN_USERNAME}"
+  _row "grafana admin"          "$(_f grafana-admin-password)"  "user: admin"
+  local argo; argo="$(_k argocd argocd-initial-admin-secret password)"
+  _row "argo cd admin"          "${argo:-(rotated or disabled)}" "user: admin"
+
+  _hdr 'registry'
+  _row "$(_f registry-username)" "$(_f registry-password)" "localhost:${REGISTRY_HOST_PORT}"
+
+  _hdr 'databases'
+  _row "platform postgres (keycloak)" "$(_f keycloak-db-password)" "user: keycloak"
+  _row "platform postgres (grafana)"  "$(_f grafana-db-password)"  "user: grafana"
+  local apg; apg="$(_k template-agent agent-secrets POSTGRES_PASSWORD)"
+  [[ -n "${apg}" ]] && _row "agent stack postgres" "${apg}" "user: $(_k template-agent agent-secrets POSTGRES_USER)"
+
+  _hdr 'object store (S3 for Loki and Velero)'
+  _row "$(_f s3-access-key)" "$(_f s3-secret-key)" "s3.storage.svc:8333"
+
+  _hdr 'vault'
+  if [[ -s "${S}/vault-unseal-keys.json" ]]; then
+    _row "unseal keys" "${S}/vault-unseal-keys.json" "$(jq -r '.unseal_keys_b64 | length' "${S}/vault-unseal-keys.json" 2>/dev/null) shares, threshold 2"
+    _row "root token" "$([[ -s "${S}/vault-root-token" ]] && echo "$(cat "${S}/vault-root-token")" || echo '(revoked -- sign in via Keycloak)')" ""
+  else
+    _row "vault" "(not initialised)" ""
+  fi
+
+  _hdr 'other'
+  # Prefer the file, but fall back to the cluster: the Secret can exist
+  # without the file if it was created before scripts/ops.sh agent-stack did.
+  local cookie; cookie="$([[ -s "${S}/ui-cookie-sign" ]] && cat "${S}/ui-cookie-sign" || _k template-agent ui-secrets COOKIE_SIGN)"
+  [[ -n "${cookie}" ]] && _row "agent UI cookie signing key" "${cookie}" "template-agent/ui-secrets"
+  _row "oauth2-proxy cookie secret" "$(_f oauth2-proxy-cookie-secret)" ""
+
+  printf '\n  %s\n' "All of the above live in .secrets/ (gitignored, chmod 600)."
+  printf '  %s\n\n' "'make reset' regenerates every one of them."
+}
+
 _usage() {
-  echo "usage: $(basename "$0") <doctor|urls|status|token|seal|break-glass|demo|gitops|push|sign|openshell|agent-stack> [args]" >&2
+  echo "usage: $(basename "$0") <doctor|urls|secrets|status|token|seal|break-glass|demo|gitops|push|sign|openshell|agent-stack> [args]" >&2
   exit 2
 }
 [[ $# -ge 1 ]] || _usage
@@ -624,6 +680,7 @@ case "${_sub}" in
   openshell) cmd_openshell "$@" ;;
   agent-stack) cmd_agent_stack "$@" ;;
   urls) cmd_urls "$@" ;;
+  secrets) cmd_secrets "$@" ;;
   status) cmd_status "$@" ;;
   token) cmd_token "$@" ;;
   seal) cmd_seal "$@" ;;
