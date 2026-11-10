@@ -588,7 +588,7 @@ cmd_agent_stack() {
     # out by enforce_capability, which looks like the tool silently not
     # existing.
     if ! grep -q 'openshell_run_code' "${SRC}/template-agent/config/agent/PROMPT.md"; then
-      sed -i.bak -E 's|^tools:$|tools:\n  - openshell_run_code|' \
+      sed -i.bak -E 's|^tools:$|tools:\n  - openshell_run_code\n  - openshell_write_file\n  - openshell_read_file\n  - openshell_list_files\n  - openshell_reset_sandbox|' \
         "${SRC}/template-agent/config/agent/PROMPT.md"
       rm -f "${SRC}/template-agent/config/agent/PROMPT.md.bak"
       grep -q 'openshell_run_code' "${SRC}/template-agent/config/agent/PROMPT.md" \
@@ -613,8 +613,12 @@ programmatically, check a value, or inspect the sandbox environment.
 
 - Call `openshell_run_code` with `code` and `language` ("python", "bash").
 - Report the tool's output verbatim. Do not invent output you did not get.
-- Each call gets a fresh sandbox: nothing persists between calls, and the
-  sandbox has no network access and no cluster credentials.
+- The sandbox is a long-lived session shared across calls, so state DOES
+  persist: files, installed packages and anything written to disk are
+  still there next time. Call `openshell_reset_sandbox` for a clean slate.
+- It has no network access beyond DNS and no cluster credentials.
+- You can also write, read and list files with `openshell_write_file`,
+  `openshell_read_file` and `openshell_list_files`.
 - If the tool returns an error, show it rather than guessing at a cause.
 PROMPTEOF
       grep -q 'Running code' "${SRC}/template-agent/config/agent/PROMPT.md" \

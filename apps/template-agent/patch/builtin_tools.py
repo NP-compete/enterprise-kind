@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import threading
 import time
 import uuid
 
@@ -53,6 +55,14 @@ IMAGE = os.environ.get("SANDBOX_IMAGE", "docker.io/library/python:3.12-slim")
 READY_TIMEOUT = int(os.environ.get("SANDBOX_READY_TIMEOUT", "120"))
 MAX_OUTPUT = int(os.environ.get("SANDBOX_MAX_OUTPUT", "16000"))
 SANDBOX_HOSTNAME = os.environ.get("SANDBOX_HOSTNAME", "openshell-sandbox")
+# A fixed sandbox reused across calls, after langchain-ai/openshell-deepagent:
+# one long-lived session rather than a pod per invocation. Creating a pod cost
+# ~2s on every call and threw away anything the previous snippet installed or
+# wrote. Set SANDBOX_NAME to pin a specific one.
+SESSION_NAME = os.environ.get("SANDBOX_NAME", "openshell-session")
+SESSION_IDLE_TTL = int(os.environ.get("SANDBOX_IDLE_TTL", "3600"))
+
+_session_lock = threading.Lock()
 
 GROUP, VERSION, PLURAL = "agents.x-k8s.io", "v1beta1", "sandboxes"
 INTERPRETERS = {
@@ -120,7 +130,7 @@ def _manifest(name: str) -> dict:
                             # something identifiable.
                             "name": "openshell",
                             "image": IMAGE,
-                            "command": ["sleep", "3600"],
+                            "command": ["sleep", str(SESSION_IDLE_TTL)],
                             # Kyverno enforces requests in this namespace.
                             "resources": {
                                 "requests": {"cpu": "50m", "memory": "128Mi"},
@@ -155,6 +165,80 @@ def _wait_for_pod(core, name: str) -> str:
     raise TimeoutError(f"sandbox not ready within {READY_TIMEOUT}s ({last})")
 
 
+def _ensure_session(core, custom) -> str:
+    """Return the pod name of the shared sandbox, creating it if needed.
+
+    Serialised: two concurrent tool calls would otherwise both decide the
+    sandbox is missing and race to create it, and the loser gets a
+    409 AlreadyExists that surfaces to the model as a tool failure.
+    """
+    from kubernetes.client.rest import ApiException
+
+    with _session_lock:
+        pods = core.list_namespaced_pod(
+            NAMESPACE, label_selector=f"sandbox={SESSION_NAME}"
+        ).items
+        running = [p for p in pods if p.status.phase == "Running"]
+        if running:
+            return running[0].metadata.name
+
+        # Clear a dead sandbox before recreating, or the name collides.
+        try:
+            custom.get_namespaced_custom_object(
+                GROUP, VERSION, NAMESPACE, PLURAL, SESSION_NAME
+            )
+            custom.delete_namespaced_custom_object(
+                GROUP, VERSION, NAMESPACE, PLURAL, SESSION_NAME
+            )
+            for _ in range(30):
+                if not core.list_namespaced_pod(
+                    NAMESPACE, label_selector=f"sandbox={SESSION_NAME}"
+                ).items:
+                    break
+                time.sleep(2)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+
+        _emit("openshell_session_create", session=SESSION_NAME)
+        custom.create_namespaced_custom_object(
+            GROUP, VERSION, NAMESPACE, PLURAL, _manifest(SESSION_NAME)
+        )
+        return _wait_for_pod(core, SESSION_NAME)
+
+
+def _exec(core, pod: str, argv: list[str], timeout_s: int) -> tuple[str, bool]:
+    """Run argv in the sandbox, returning (combined output, timed_out)."""
+    from kubernetes import stream
+
+    resp = stream.stream(
+        core.connect_get_namespaced_pod_exec, pod, NAMESPACE,
+        command=argv, container="openshell",
+        stderr=True, stdout=True, stdin=False, tty=False,
+        _preload_content=False,
+    )
+    out: list[str] = []
+    err: list[str] = []
+    deadline = time.time() + timeout_s
+    timed_out = False
+    while resp.is_open():
+        if time.time() > deadline:
+            timed_out = True
+            resp.close()
+            break
+        resp.update(timeout=1)
+        if resp.peek_stdout():
+            out.append(resp.read_stdout())
+        if resp.peek_stderr():
+            err.append(resp.read_stderr())
+    if not timed_out:
+        resp.close()
+    body = "".join(out)
+    if err:
+        body += "\n--- stderr ---\n" + "".join(err)
+    return body, timed_out
+
+
 def _truncate(text: str) -> str:
     if len(text) <= MAX_OUTPUT:
         return text
@@ -163,20 +247,23 @@ def _truncate(text: str) -> str:
 
 @tool
 def openshell_run_code(code: str, language: str = "python", timeout_s: int = 60) -> str:
-    """Execute code in a disposable OpenShell sandbox and return its output.
+    """Run code in the OpenShell sandbox and return its output.
 
-    Use this to run calculations, transform data, or test a snippet. The
-    sandbox is created for this call and destroyed afterwards: nothing
-    persists between calls, there is no network access beyond what policy
-    allows, and no cluster credentials are available to the code.
+    The sandbox is a long-lived session shared across calls, so state DOES
+    persist: files you write, packages you install and variables saved to
+    disk are still there next time. Use openshell_reset_sandbox for a clean
+    slate.
+
+    It runs as a non-root user with no Kubernetes credentials and no network
+    access beyond DNS.
 
     Args:
         code: Source to execute.
         language: One of "python", "bash", "sh". Defaults to "python".
-        timeout_s: Seconds to allow execution, 1-300. Defaults to 60.
+        timeout_s: Seconds to allow, 1-300. Defaults to 60.
 
     Returns:
-        The combined stdout and stderr of the snippet.
+        Combined stdout and stderr.
     """
     lang = (language or "python").lower().strip()
     if lang not in INTERPRETERS:
@@ -185,84 +272,124 @@ def openshell_run_code(code: str, language: str = "python", timeout_s: int = 60)
         return "error: no code supplied"
     timeout_s = max(1, min(int(timeout_s or 60), 300))
 
-    from kubernetes import stream
     from kubernetes.client.rest import ApiException
 
+    run_id = uuid.uuid4().hex[:8]
+    started = time.time()
+    _emit("openshell_run_started", run_id=run_id, session=SESSION_NAME,
+          language=lang, timeout_s=timeout_s, code_bytes=len(code),
+          code_preview=code[:400])
     try:
         core, custom = _clients()
-    except Exception as exc:  # noqa: BLE001
-        return f"error: no Kubernetes access from the agent ({type(exc).__name__}: {exc})"
-
-    name = f"agent-code-{uuid.uuid4().hex[:8]}"
-    started = time.time()
-    _emit("openshell_run_started", run_id=name, language=lang,
-          timeout_s=timeout_s, code_bytes=len(code),
-          code_preview=code[:400])
-    created = False
-    try:
-        custom.create_namespaced_custom_object(GROUP, VERSION, NAMESPACE, PLURAL, _manifest(name))
-        created = True
-        pod = _wait_for_pod(core, name)
-
-        resp = stream.stream(
-            core.connect_get_namespaced_pod_exec,
-            pod,
-            NAMESPACE,
-            command=INTERPRETERS[lang] + [code],
-            container="openshell",
-            stderr=True,
-            stdout=True,
-            stdin=False,
-            tty=False,
-            _preload_content=False,
-        )
-        out: list[str] = []
-        err: list[str] = []
-        deadline = time.time() + timeout_s
-        timed_out = False
-        while resp.is_open():
-            if time.time() > deadline:
-                timed_out = True
-                resp.close()
-                break
-            resp.update(timeout=1)
-            if resp.peek_stdout():
-                out.append(resp.read_stdout())
-            if resp.peek_stderr():
-                err.append(resp.read_stderr())
-        if not timed_out:
-            resp.close()
-
-        body = "".join(out)
-        if err:
-            body += "\n--- stderr ---\n" + "".join(err)
+        pod = _ensure_session(core, custom)
+        body, timed_out = _exec(core, pod, INTERPRETERS[lang] + [code], timeout_s)
         if timed_out:
             body += f"\n[timed out after {timeout_s}s]"
-        _emit("openshell_run_finished", run_id=name, language=lang,
-              status="timeout" if timed_out else "ok",
+        _emit("openshell_run_finished", run_id=run_id, session=SESSION_NAME,
+              language=lang, status="timeout" if timed_out else "ok",
               duration_s=round(time.time() - started, 3),
-              stdout_bytes=len("".join(out)), stderr_bytes=len("".join(err)),
               output_preview=_truncate(body)[:800])
         return _truncate(body) or "(no output)"
-
     except ApiException as exc:
-        _emit("openshell_run_finished", run_id=name, language=lang,
+        _emit("openshell_run_finished", run_id=run_id, session=SESSION_NAME,
               status="error", duration_s=round(time.time() - started, 3),
               error=f"kubernetes API {exc.status} {exc.reason}")
         return f"error: kubernetes API {exc.status} {exc.reason}"
     except Exception as exc:  # noqa: BLE001 - returned to the model, not swallowed
-        _emit("openshell_run_finished", run_id=name, language=lang,
+        _emit("openshell_run_finished", run_id=run_id, session=SESSION_NAME,
               status="error", duration_s=round(time.time() - started, 3),
               error=f"{type(exc).__name__}: {exc}")
         return f"error: {type(exc).__name__}: {exc}"
-    finally:
-        if created:
+
+
+@tool
+def openshell_write_file(path: str, content: str) -> str:
+    """Write a text file inside the sandbox, creating parent directories.
+
+    Args:
+        path: Absolute or relative path inside the sandbox.
+        content: File contents.
+    """
+    try:
+        core, custom = _clients()
+        pod = _ensure_session(core, custom)
+        script = (
+            f"mkdir -p {shlex.quote(os.path.dirname(path) or '.')} && "
+            f"cat > {shlex.quote(path)} <<'__OS_EOF__'\n{content}\n__OS_EOF__\n"
+            f"wc -c < {shlex.quote(path)}"
+        )
+        body, timed_out = _exec(core, pod, ["/bin/sh", "-c", script], 60)
+        if timed_out:
+            return f"error: timed out writing {path}"
+        _emit("openshell_file_write", session=SESSION_NAME, path=path,
+              bytes=len(content))
+        return f"wrote {path} ({body.strip()} bytes)"
+    except Exception as exc:  # noqa: BLE001
+        return f"error: {type(exc).__name__}: {exc}"
+
+
+@tool
+def openshell_read_file(path: str, max_bytes: int = 8000) -> str:
+    """Read a text file from the sandbox.
+
+    Args:
+        path: Path inside the sandbox.
+        max_bytes: Truncate beyond this many bytes.
+    """
+    try:
+        core, custom = _clients()
+        pod = _ensure_session(core, custom)
+        body, timed_out = _exec(
+            core, pod,
+            ["/bin/sh", "-c", f"head -c {int(max_bytes)} {shlex.quote(path)}"], 60)
+        if timed_out:
+            return f"error: timed out reading {path}"
+        return _truncate(body) or "(empty)"
+    except Exception as exc:  # noqa: BLE001
+        return f"error: {type(exc).__name__}: {exc}"
+
+
+@tool
+def openshell_list_files(path: str = ".") -> str:
+    """List files in the sandbox.
+
+    Args:
+        path: Directory to list. Defaults to the working directory.
+    """
+    try:
+        core, custom = _clients()
+        pod = _ensure_session(core, custom)
+        body, _ = _exec(core, pod, ["/bin/sh", "-c", f"ls -la {shlex.quote(path)}"], 30)
+        return _truncate(body) or "(empty)"
+    except Exception as exc:  # noqa: BLE001
+        return f"error: {type(exc).__name__}: {exc}"
+
+
+@tool
+def openshell_reset_sandbox() -> str:
+    """Destroy the sandbox so the next call starts from a clean one.
+
+    Use when previous state is getting in the way, or to discard anything a
+    prior snippet left behind.
+    """
+    from kubernetes.client.rest import ApiException
+    try:
+        _, custom = _clients()
+        with _session_lock:
             try:
-                custom.delete_namespaced_custom_object(GROUP, VERSION, NAMESPACE, PLURAL, name)
-            except Exception:  # noqa: BLE001 - best effort cleanup
-                pass
+                custom.delete_namespaced_custom_object(
+                    GROUP, VERSION, NAMESPACE, PLURAL, SESSION_NAME)
+            except ApiException as exc:
+                if exc.status != 404:
+                    raise
+        _emit("openshell_session_reset", session=SESSION_NAME)
+        return "sandbox destroyed; the next call will start a fresh one"
+    except Exception as exc:  # noqa: BLE001
+        return f"error: {type(exc).__name__}: {exc}"
 
 
 def get_builtin_tools() -> list:
     """Tools assembled into the agent alongside the MCP ones."""
-    return [openshell_run_code]
+    return [openshell_run_code, openshell_write_file,
+            openshell_read_file, openshell_list_files,
+            openshell_reset_sandbox]
