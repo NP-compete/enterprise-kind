@@ -1,0 +1,24 @@
+# A sandbox runtime image: a Project Hummingbird builder variant plus the
+# one package the agent's backend cannot work without.
+#
+# deepagents' BaseSandbox implements read, ls, grep, glob and edit as
+# python3 scripts delivered over the shell, so a sandbox without python3
+# can run `execute` and nothing else. The Hummingbird Python image already
+# has it; Node and Go do not, and the pod cannot install it for itself --
+# its egress is DNS-only, by policy, on purpose.
+#
+# The builder variant, not the default: the default variants are
+# distroless, and a sandbox with no shell cannot run a shell command.
+ARG SANDBOX_BASE_IMAGE
+FROM ${SANDBOX_BASE_IMAGE}
+
+USER 0
+RUN dnf -y --setopt=install_weak_deps=False install python3 \
+ && dnf clean all \
+ && rm -rf /var/cache/dnf \
+ && python3 -c 'import sys; print(sys.version)'
+
+# Back to Hummingbird's own non-root default. The pod overrides this with
+# runAsUser 1000 anyway; leaving the image as root would just mean a
+# different failure if that ever stopped being set.
+USER 65532

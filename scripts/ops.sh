@@ -581,6 +581,31 @@ cmd_agent_stack() {
     "${CE}" pull -q "${AGENT_IMAGE}" >/dev/null \
       || die "could not pull ${AGENT_IMAGE}"
 
+    # Sandbox runtimes. The images and their bases are declared once, in
+    # the backend module, and read back out here -- a table duplicated in
+    # a shell script is a table that drifts.
+    local BACKEND="${ROOT_DIR}/apps/template-agent/patch/openshell_backend.py"
+    local rt base tag
+    while read -r rt tag base; do
+      [[ -n "${rt}" ]] || continue
+      step "building sandbox runtime ${rt} (${base} + python3)"
+      "${CE}" build -q -t "${tag#localhost/}" --build-arg "SANDBOX_BASE_IMAGE=${base}" \
+        -f "${ROOT_DIR}/apps/template-agent/patch/Containerfile.sandbox" \
+        "${ROOT_DIR}/apps/template-agent/patch" >/dev/null \
+        || die "sandbox runtime ${rt} build failed"
+      _load "${tag#localhost/}"
+    done < <(python3 - "${BACKEND}" <<'PYEOF'
+import ast, sys
+tree = ast.parse(open(sys.argv[1]).read())
+top = {t.id: ast.literal_eval(n.value)
+       for n in tree.body if isinstance(n, ast.Assign)
+       for t in n.targets
+       if isinstance(t, ast.Name) and t.id in ("RUNTIMES", "DERIVED_FROM")}
+for name, base in top["DERIVED_FROM"].items():
+    print(name, top["RUNTIMES"][name], base)
+PYEOF
+    )
+
     # The agent image ships an empty /app/config/agent: its Containerfile
     # sets CONFIG_PATH but never copies config in, so the agent exits with
     # "Missing required config files". The tree is nested, which ConfigMap
@@ -610,7 +635,7 @@ cmd_agent_stack() {
     sed -i.bak -E \
       '/^  - (execute|read_file|write_file|edit_file|ls|glob|grep|delete|openshell_[a-z_]+)$/d' \
       "${PROMPT_MD}"
-    sed -i.bak -E 's|^tools:$|tools:\n  - execute\n  - read_file\n  - write_file\n  - edit_file\n  - ls\n  - glob\n  - grep\n  - delete\n  - openshell_reset_sandbox|' \
+    sed -i.bak -E 's|^tools:$|tools:\n  - execute\n  - read_file\n  - write_file\n  - edit_file\n  - ls\n  - glob\n  - grep\n  - delete\n  - openshell_use_runtime\n  - openshell_reset_sandbox|' \
       "${PROMPT_MD}"
     rm -f "${PROMPT_MD}.bak"
     grep -q '^  - openshell_reset_sandbox$' "${PROMPT_MD}" \
@@ -642,6 +667,10 @@ programmatically, check a value, or inspect the sandbox environment.
 - The sandbox is a long-lived session shared across calls, so state DOES
   persist: files, installed packages and anything written to disk are
   still there next time. Call `openshell_reset_sandbox` for a clean slate.
+- Python is the default runtime. For JavaScript or Go, call
+  `openshell_use_runtime` with "node" or "go" first. Each runtime is a
+  separate pod with its own filesystem, and the first command after a
+  switch is slow because the image has to be pulled.
 - It has no network access beyond DNS and no cluster credentials.
 - If a tool returns an error, show it rather than guessing at a cause.
 PROMPTEOF

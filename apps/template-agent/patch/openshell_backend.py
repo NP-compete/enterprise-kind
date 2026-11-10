@@ -19,8 +19,12 @@ Making the sandbox the composite's *default* is what turns on the
 filesystem is no longer reachable through any file tool -- every path
 that does not match a route lands in the sandbox instead.
 
-The sandbox pod mounts no service account token, runs non-root with all
-capabilities dropped, and is covered by a default-deny egress
+There is one sandbox per language runtime, each created on first use, so
+an agent that only runs Python never pulls a Go toolchain. The images are
+Red Hat Project Hummingbird builder variants.
+
+The sandbox pods mount no service account token, run non-root with all
+capabilities dropped, and are covered by a default-deny egress
 NetworkPolicy (DNS only) shipped alongside this module. That policy is
 ours: OpenShell's own only selects the pods its gateway manages and only
 restricts Ingress, so without it these sandboxes had full outbound
@@ -72,15 +76,51 @@ def _emit(event: str, **fields) -> None:
 
 
 NAMESPACE = os.environ.get("SANDBOX_NAMESPACE", "template-agent")
-IMAGE = os.environ.get("SANDBOX_IMAGE", "docker.io/library/python:3.12-slim")
+
+# Red Hat's Project Hummingbird images: minimal, CIS-hardened, reproducible,
+# built for a near-zero CVE count. All three are the `-builder` variant and
+# that is not a detail -- the default variants are distroless. They have no
+# shell at all, and this backend is shell-first: BaseSandbox turns read,
+# write, grep, glob and ls into /bin/sh commands, and the pod's keepalive
+# command is `sleep`. A distroless image cannot even start the container.
+# The builder variants ship bash, coreutils and dnf alongside the runtime.
+#
+# Versioned tags, not :latest-builder -- partly because Kyverno's
+# disallow-latest-tag is enforcing here, mostly because a floating base for
+# a sandbox means the environment changes under the agent without anything
+# in git moving.
+# A sandbox image needs more than its own runtime: BaseSandbox implements
+# read, ls, grep, glob and edit as python3 scripts piped through the shell,
+# so an image without python3 supports `execute` and nothing else. The
+# Hummingbird Python image has it; the others need one package added, which
+# cannot happen in the pod -- its egress is DNS-only by policy. So they are
+# derived at build time instead, by scripts/ops.sh, and loaded into the
+# cluster the same way the agent image is. This map is the single source of
+# truth for both: ops.sh reads it out of this file.
+DERIVED_FROM = {
+    "node": "registry.access.redhat.com/hi/nodejs:22-builder",
+    "go": "registry.access.redhat.com/hi/go:1.25.10-builder",
+}
+RUNTIMES = {
+    "python": "registry.access.redhat.com/hi/python:3.14-builder",
+    "node": "localhost/openshell-sandbox-node:22",
+    "go": "localhost/openshell-sandbox-go:1.25.10",
+}
+DEFAULT_RUNTIME = os.environ.get("SANDBOX_RUNTIME", "python")
+# Escape hatch for a one-off image, applied to the default runtime only.
+if os.environ.get("SANDBOX_IMAGE"):
+    RUNTIMES[DEFAULT_RUNTIME] = os.environ["SANDBOX_IMAGE"]
+
 READY_TIMEOUT = int(os.environ.get("SANDBOX_READY_TIMEOUT", "120"))
 MAX_OUTPUT = int(os.environ.get("SANDBOX_MAX_OUTPUT", "16000"))
 SANDBOX_HOSTNAME = os.environ.get("SANDBOX_HOSTNAME", "openshell-sandbox")
 # A fixed sandbox reused across calls, after langchain-ai/openshell-deepagent:
 # one long-lived session rather than a pod per invocation. Creating a pod cost
 # ~2s on every call and threw away anything the previous command installed or
-# wrote. Set SANDBOX_NAME to pin a specific one.
-SESSION_NAME = os.environ.get("SANDBOX_NAME", "openshell-session")
+# wrote. One session per runtime, named <base>-<runtime>, created on first
+# use -- so switching to Go does not pull a Go toolchain for an agent that
+# only ever runs Python.
+SESSION_BASE = os.environ.get("SANDBOX_NAME", "openshell-session")
 SESSION_IDLE_TTL = int(os.environ.get("SANDBOX_IDLE_TTL", "3600"))
 # Where relative paths resolve and where commands run. The image's root
 # filesystem is not writable by uid 1000, so a working directory has to be
@@ -94,6 +134,12 @@ DEFAULT_TIMEOUT = int(os.environ.get("SANDBOX_EXEC_TIMEOUT", "120"))
 ARTIFACTS_ROOT = "/artifacts/"
 
 _session_lock = threading.Lock()
+# Which runtime subsequent commands land in. Process-wide, not per
+# conversation: the backend is called by the filesystem middleware, which
+# hands it a path and a command and no request context. For one operator
+# that is fine; with concurrent users, one switching to Go would move
+# everyone. Pin SANDBOX_RUNTIME and drop the tool if that matters.
+_active_runtime = DEFAULT_RUNTIME
 
 GROUP, VERSION, PLURAL = "agents.x-k8s.io", "v1beta1", "sandboxes"
 # One exec carries at most this much base64 in its argv. Linux caps a whole
@@ -118,7 +164,7 @@ def _clients():
     return client.CoreV1Api(), client.CustomObjectsApi()
 
 
-def _manifest(name: str) -> dict:
+def _manifest(name: str, image: str) -> dict:
     return {
         "apiVersion": f"{GROUP}/{VERSION}",
         "kind": "Sandbox",
@@ -159,12 +205,16 @@ def _manifest(name: str) -> dict:
                             # `kubectl logs -c openshell` and exec target
                             # something identifiable.
                             "name": "openshell",
-                            "image": IMAGE,
+                            "image": image,
                             "command": ["sleep", str(SESSION_IDLE_TTL)],
                             # Kyverno enforces requests in this namespace.
+                            # The ceiling is 1 GiB rather than 512 MiB
+                            # because `go build` on a cold module cache
+                            # walks past half a gigabyte and gets OOM-killed
+                            # with no message the model can act on.
                             "resources": {
                                 "requests": {"cpu": "50m", "memory": "128Mi"},
-                                "limits": {"cpu": "1", "memory": "512Mi"},
+                                "limits": {"cpu": "1", "memory": "1Gi"},
                             },
                             "securityContext": {
                                 "allowPrivilegeEscalation": False,
@@ -176,6 +226,11 @@ def _manifest(name: str) -> dict:
             }
         },
     }
+
+
+def _session_name(runtime: str | None = None) -> str:
+    """Sandbox name for a runtime -- one pod per runtime, created lazily."""
+    return f"{SESSION_BASE}-{runtime or _active_runtime}"
 
 
 def _wait_for_pod(core, name: str) -> str:
@@ -205,19 +260,19 @@ class OpenShellSandbox(BaseSandbox):
     """
 
     # The capture wrapper assumes a shell and coreutils the base class does
-    # not guarantee. python:3.12-slim has both, but output already passes
+    # not guarantee. The builder images have both, but output already passes
     # through the exec websocket, so there is nothing to gain by capturing
     # at the source; left off.
     enable_capture_offload = False
 
     @property
     def id(self) -> str:
-        return f"{NAMESPACE}/{SESSION_NAME}"
+        return f"{NAMESPACE}/{_session_name()}"
 
     # -- session -------------------------------------------------------
 
     def _session(self) -> tuple:
-        """Return (CoreV1Api, pod name) for the shared sandbox.
+        """Return (CoreV1Api, pod name) for the active runtime's sandbox.
 
         Serialised: two concurrent calls would otherwise both decide the
         sandbox is missing and race to create it, and the loser gets a
@@ -225,10 +280,12 @@ class OpenShellSandbox(BaseSandbox):
         """
         from kubernetes.client.rest import ApiException
 
+        runtime = _active_runtime
+        name = _session_name(runtime)
         core, custom = _clients()
         with _session_lock:
             pods = core.list_namespaced_pod(
-                NAMESPACE, label_selector=f"sandbox={SESSION_NAME}"
+                NAMESPACE, label_selector=f"sandbox={name}"
             ).items
             running = [p for p in pods if p.status.phase == "Running"]
             if running:
@@ -237,14 +294,14 @@ class OpenShellSandbox(BaseSandbox):
             # Clear a dead sandbox before recreating, or the name collides.
             try:
                 custom.get_namespaced_custom_object(
-                    GROUP, VERSION, NAMESPACE, PLURAL, SESSION_NAME
+                    GROUP, VERSION, NAMESPACE, PLURAL, name
                 )
                 custom.delete_namespaced_custom_object(
-                    GROUP, VERSION, NAMESPACE, PLURAL, SESSION_NAME
+                    GROUP, VERSION, NAMESPACE, PLURAL, name
                 )
                 for _ in range(30):
                     if not core.list_namespaced_pod(
-                        NAMESPACE, label_selector=f"sandbox={SESSION_NAME}"
+                        NAMESPACE, label_selector=f"sandbox={name}"
                     ).items:
                         break
                     time.sleep(2)
@@ -252,29 +309,35 @@ class OpenShellSandbox(BaseSandbox):
                 if exc.status != 404:
                     raise
 
-            _emit("openshell_session_create", session=SESSION_NAME)
+            _emit("openshell_session_create", session=name, runtime=runtime,
+                  image=RUNTIMES[runtime])
             custom.create_namespaced_custom_object(
-                GROUP, VERSION, NAMESPACE, PLURAL, _manifest(SESSION_NAME)
+                GROUP, VERSION, NAMESPACE, PLURAL,
+                _manifest(name, RUNTIMES[runtime])
             )
-            pod = _wait_for_pod(core, SESSION_NAME)
+            # The first command in a runtime waits for an image pull, not
+            # just a scheduling decision: these are multi-hundred-MiB
+            # builder images and nothing pre-pulls them onto the node.
+            pod = _wait_for_pod(core, name)
 
         self._raw(core, pod, ["/bin/sh", "-c", f"mkdir -p {shlex.quote(WORKDIR)}"], 30)
         return core, pod
 
-    def reset(self) -> str:
-        """Delete the session pod; the next command creates a fresh one."""
+    def reset(self, runtime: str | None = None) -> str:
+        """Delete a session pod; the next command creates a fresh one."""
         from kubernetes.client.rest import ApiException
 
+        name = _session_name(runtime)
         _, custom = _clients()
         with _session_lock:
             try:
                 custom.delete_namespaced_custom_object(
-                    GROUP, VERSION, NAMESPACE, PLURAL, SESSION_NAME)
+                    GROUP, VERSION, NAMESPACE, PLURAL, name)
             except ApiException as exc:
                 if exc.status != 404:
                     raise
-        _emit("openshell_session_reset", session=SESSION_NAME)
-        return "sandbox destroyed; the next command will start a fresh one"
+        _emit("openshell_session_reset", session=name)
+        return f"{name} destroyed; the next command will start a fresh one"
 
     # -- the exec primitive --------------------------------------------
 
@@ -347,17 +410,18 @@ class OpenShellSandbox(BaseSandbox):
         """
         timeout_s = max(1, min(int(timeout or DEFAULT_TIMEOUT), 600))
         run_id = uuid.uuid4().hex[:8]
+        session = _session_name()
         started = time.time()
-        _emit("openshell_run_started", run_id=run_id, session=SESSION_NAME,
-              timeout_s=timeout_s, command_bytes=len(command),
-              command_preview=command[:400])
+        _emit("openshell_run_started", run_id=run_id, session=session,
+              runtime=_active_runtime, timeout_s=timeout_s,
+              command_bytes=len(command), command_preview=command[:400])
         try:
             core, pod = self._session()
             argv = ["/bin/sh", "-c",
                     f"cd {shlex.quote(WORKDIR)} 2>/dev/null || cd /tmp\n{command}"]
             out, err, code = self._raw(core, pod, argv, timeout_s)
         except Exception as exc:
-            _emit("openshell_run_finished", run_id=run_id, session=SESSION_NAME,
+            _emit("openshell_run_finished", run_id=run_id, session=session,
                   status="error", duration_s=round(time.time() - started, 3),
                   error=f"{type(exc).__name__}: {exc}")
             raise
@@ -369,7 +433,7 @@ class OpenShellSandbox(BaseSandbox):
         truncated = len(body) > MAX_OUTPUT
         if truncated:
             body = f"{body[:MAX_OUTPUT]}\n...[truncated, {len(body) - MAX_OUTPUT} more bytes]"
-        _emit("openshell_run_finished", run_id=run_id, session=SESSION_NAME,
+        _emit("openshell_run_finished", run_id=run_id, session=session,
               status="ok" if code == 0 else "error", exit_code=code,
               duration_s=round(time.time() - started, 3),
               output_preview=body[:800])
@@ -480,12 +544,32 @@ def wrap_backend(backend: BackendProtocol) -> BackendProtocol:
 
 
 @tool
+def openshell_use_runtime(name: str) -> str:
+    """Choose which language runtime the sandbox runs commands in.
+
+    Each runtime is a separate pod with its own filesystem, so files
+    written under one are NOT visible from another. The first command
+    after switching waits for the image to be pulled; later ones do not.
+
+    Args:
+        name: One of "python", "node", "go".
+    """
+    global _active_runtime
+    name = (name or "").strip().lower()
+    if name not in RUNTIMES:
+        return f"error: unknown runtime {name!r}; choose one of {sorted(RUNTIMES)}"
+    _active_runtime = name
+    _emit("openshell_runtime_selected", runtime=name, image=RUNTIMES[name])
+    return f"runtime is now {name} ({RUNTIMES[name]}); its filesystem is separate from the others"
+
+
+@tool
 def openshell_reset_sandbox() -> str:
-    """Destroy the sandbox so the next command starts from a clean one.
+    """Destroy the current runtime's sandbox for a clean one.
 
     Use when previous state is getting in the way, or to discard anything
     an earlier command left behind. Files, installed packages and the
-    working directory all go.
+    working directory all go. Other runtimes are untouched.
     """
     try:
         return get_sandbox().reset()
@@ -494,11 +578,11 @@ def openshell_reset_sandbox() -> str:
 
 
 def get_builtin_tools() -> list:
-    """The one tool the filesystem middleware does not already provide.
+    """The two tools the filesystem middleware does not already provide.
 
     Everything else the model needs -- execute, read_file, write_file,
     edit_file, ls, glob, grep -- `FilesystemMiddleware` derives from the
-    backend itself. Recreating the pod is not a filesystem operation, so
-    it has no equivalent there.
+    backend itself. Choosing a runtime and recreating the pod are not
+    filesystem operations, so they have no equivalent there.
     """
-    return [openshell_reset_sandbox]
+    return [openshell_use_runtime, openshell_reset_sandbox]

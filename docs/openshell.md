@@ -142,3 +142,41 @@ nodes are real hosts, neither failure applies. The agent's own sandbox tool
 therefore drives the Agent Sandbox CRD directly (see
 `apps/template-agent/patch/openshell_backend.py`), which works because those
 pods do not set `hostUsers`.
+
+## The agent's sandbox runtimes
+
+The agent gets one sandbox pod per language, created on first use:
+
+| Runtime | Image | Built? |
+|---|---|---|
+| `python` (default) | `registry.access.redhat.com/hi/python:3.14-builder` | pulled as-is |
+| `node` | `localhost/openshell-sandbox-node:22` | Hummingbird nodejs + python3 |
+| `go` | `localhost/openshell-sandbox-go:1.25.10` | Hummingbird go + python3 |
+
+All three are Red Hat [Project Hummingbird](https://hummingbird-project.io/)
+images — minimal, CIS-hardened, reproducible builds. Two details decide the
+shape of this:
+
+- **The `-builder` variant, always.** Hummingbird's default variants are
+  distroless: no shell, no package manager. This backend is shell-first
+  (`BaseSandbox` turns every file operation into a `/bin/sh` command, and the
+  pod's keepalive command is `sleep`), so a distroless image cannot even
+  start the container.
+- **Every runtime needs `python3`.** Not for the user's code — for
+  deepagents: `read_file`, `ls`, `grep`, `glob` and `edit_file` are python
+  scripts piped through the shell. Without it a runtime supports `execute`
+  and nothing else, which is how `write_file` on Node first failed with
+  `python3: command not found`. The pod cannot install it itself — its
+  egress is DNS-only — so `make agent-stack` derives the two images at build
+  time from `patch/Containerfile.sandbox` and side-loads them.
+
+The runtime table lives in `openshell_backend.py` and `ops.sh` reads it back
+out of that file, so adding a fourth runtime is one dict entry plus a
+rebuild.
+
+The model switches with `openshell_use_runtime`. Two caveats worth knowing:
+each runtime is a separate pod, so **files do not cross between them**; and
+the selection is process-wide rather than per-conversation, because the
+filesystem middleware calls the backend with no request context. Fine for
+one operator, wrong for concurrent tenants — pin `SANDBOX_RUNTIME` and drop
+the tool if that ever matters.

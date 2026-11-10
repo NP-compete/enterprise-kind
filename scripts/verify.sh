@@ -196,6 +196,13 @@ check "gateway validates Keycloak tokens" bash -c \
      | grep -q 'issuer = \"https://keycloak.${BASE_DOMAIN}'"
 check "gateway trusts the CA Keycloak is served from" bash -c \
   "kubectl --context ${KUBECONTEXT} -n openshell get configmap platform-ca >/dev/null"
+# The agent's sandbox runtimes are built and side-loaded, not pulled, so a
+# missing one fails at the first tool call with ImagePullBackOff rather
+# than at install time. Node images list what the CRI actually holds.
+check "sandbox runtime images loaded on the worker" bash -c \
+  "test \"\$(kubectl --context ${KUBECONTEXT} get node ${CLUSTER_NAME}-worker \
+     -o jsonpath='{.status.images[*].names}' \
+   | tr ' ' '\n' | grep -c 'openshell-sandbox-\(node\|go\)')\" -ge 2"
 # OpenShell's whole isolation model rests on the CNI enforcing egress
 # policy. Kubernetes accepts NetworkPolicy objects regardless, so this
 # asserts enforcement rather than presence.
