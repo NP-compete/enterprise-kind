@@ -227,19 +227,47 @@ patches:
                   - name: SSO_CLIENT_SECRET
                     valueFrom:
                       secretKeyRef: { name: ui-secrets, key: SSO_CLIENT_SECRET }
-                  # Keycloak serves a platform-CA certificate; without this
-                  # the agent's OIDC discovery fails TLS verification.
+                  # A COMBINED bundle: the image's 118 public CAs plus the
+                  # platform CA, built by the init container below.
+                  #
+                  # Pointing these at the platform CA alone replaces the
+                  # system trust store rather than extending it -- OIDC
+                  # against Keycloak then works while every public endpoint
+                  # fails, which shows up as the agent being unable to reach
+                  # oauth2.googleapis.com to mint a Vertex token.
                   - name: SSL_CERT_FILE
-                    value: /etc/platform-ca/ca.crt
+                    value: /etc/ssl/combined/ca-bundle.crt
                   - name: REQUESTS_CA_BUNDLE
-                    value: /etc/platform-ca/ca.crt
+                    value: /etc/ssl/combined/ca-bundle.crt
                 volumeMounts:
                   - name: platform-ca
                     mountPath: /etc/platform-ca
                     readOnly: true
+                  - name: ca-combined
+                    mountPath: /etc/ssl/combined
+                    readOnly: true
+            initContainers:
+              - name: ca-bundle
+                image: localhost/template-agent:local-config
+                imagePullPolicy: Never
+                command: ["sh","-c"]
+                args:
+                  - cat /etc/ssl/certs/ca-certificates.crt /etc/platform-ca/ca.crt
+                    > /work/ca-bundle.crt
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities: { drop: ["ALL"] }
+                resources:
+                  requests: { cpu: 10m, memory: 32Mi }
+                  limits: { memory: 128Mi }
+                volumeMounts:
+                  - { name: ca-combined, mountPath: /work }
+                  - { name: platform-ca, mountPath: /etc/platform-ca, readOnly: true }
             volumes:
               - name: platform-ca
                 configMap: { name: platform-ca }
+              - name: ca-combined
+                emptyDir: {}
   - target: { kind: Deployment, name: ui }
     patch: |
       apiVersion: apps/v1
