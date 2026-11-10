@@ -30,6 +30,7 @@ NAMESPACE = os.environ.get("SANDBOX_NAMESPACE", "openshell-sandboxes")
 IMAGE = os.environ.get("SANDBOX_IMAGE", "docker.io/library/python:3.12-slim")
 READY_TIMEOUT = int(os.environ.get("SANDBOX_READY_TIMEOUT", "120"))
 MAX_OUTPUT = int(os.environ.get("SANDBOX_MAX_OUTPUT", "16000"))
+SANDBOX_HOSTNAME = os.environ.get("SANDBOX_HOSTNAME", "openshell-sandbox")
 
 GROUP, VERSION, PLURAL = "agents.x-k8s.io", "v1beta1", "sandboxes"
 INTERPRETERS = {
@@ -80,6 +81,11 @@ def _manifest(name: str) -> dict:
                     # The snippet has no business talking to the API server.
                     "automountServiceAccountToken": False,
                     "restartPolicy": "Never",
+                    # Without this the hostname is the generated pod name
+                    # (agent-code-<hex>), which is what the model reports
+                    # back when asked. A stable name is both meaningful and
+                    # stops a random id leaking into the conversation.
+                    "hostname": SANDBOX_HOSTNAME,
                     "securityContext": {
                         "runAsNonRoot": True,
                         "runAsUser": 1000,
@@ -87,7 +93,10 @@ def _manifest(name: str) -> dict:
                     },
                     "containers": [
                         {
-                            "name": "sandbox",
+                            # Named `openshell`, not a generic `sandbox`, so
+                            # `kubectl logs -c openshell` and exec target
+                            # something identifiable.
+                            "name": "openshell",
                             "image": IMAGE,
                             "command": ["sleep", "3600"],
                             # Kyverno enforces requests in this namespace.
@@ -174,7 +183,7 @@ def openshell_run_code(code: str, language: str = "python", timeout_s: int = 60)
             pod,
             NAMESPACE,
             command=INTERPRETERS[lang] + [code],
-            container="sandbox",
+            container="openshell",
             stderr=True,
             stdout=True,
             stdin=False,
