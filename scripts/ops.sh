@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Day-to-day operator commands. Read-only unless stated.
 #
-# Usage: ops.sh <doctor|urls|status|token|seal|break-glass|demo|gitops|push|sign|openshell> [args]
+# Usage: ops.sh <doctor|urls|status|token|seal|break-glass|demo|gitops|push|sign|openshell|agent-stack> [args]
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 cmd_urls() {
@@ -444,11 +444,24 @@ cmd_doctor() {
     _bad "*.${BASE_DOMAIN} is not in /etc/hosts -- consoles will not resolve" "make hosts"
   fi
 
-  if [[ -s "${ROOT_DIR}/.secrets/platform-root-ca.crt" ]] \
-     && security find-certificate -c "platform-root-ca" >/dev/null 2>&1; then
-    _good "platform CA trusted by macOS"
-  elif [[ -s "${ROOT_DIR}/.secrets/platform-root-ca.crt" ]]; then
-    _bad "platform CA is not in the keychain -- browsers will warn" "make trust-ca"
+  # Compare FINGERPRINTS, not names. Matching on common name reports
+  # "trusted" when the keychain holds a CA from a previous cluster -- which
+  # is exactly what happens after `make reset`, and presents in the browser
+  # as ERR_CERT_AUTHORITY_INVALID with no way to click through under HSTS.
+  if [[ -s "${ROOT_DIR}/.secrets/platform-root-ca.crt" ]]; then
+    local want have
+    want="$(openssl x509 -in "${ROOT_DIR}/.secrets/platform-root-ca.crt" -noout -fingerprint -sha256 2>/dev/null \
+            | cut -d= -f2 | tr -d ': ')"
+    have="$(security find-certificate -a -Z 2>/dev/null | grep -c "${want}" || true)"
+    if [[ "${have:-0}" -gt 0 ]]; then
+      _good "platform CA trusted by macOS"
+    elif security find-certificate -c "kind-platform-root-ca" >/dev/null 2>&1; then
+      _bad "a DIFFERENT platform CA is trusted -- this cluster's CA is not" \
+           "the keychain holds a CA from a previous cluster (.secrets/ was wiped)" \
+           "make untrust-ca && make trust-ca"
+    else
+      _bad "platform CA is not in the keychain -- browsers will warn" "make trust-ca"
+    fi
   fi
 
   # --- ingress -------------------------------------------------------------
@@ -504,8 +517,104 @@ cmd_openshell() {
   kc -n "${ns}" port-forward svc/openshell 8080:8080
 }
 
+cmd_agent_stack() {
+  # Builds and deploys the Red Hat template-agent + template-ui stack into
+  # this cluster. Upstream ships `make kind`, which creates its OWN cluster;
+  # this targets the existing one and adapts the overlay to platform policy.
+  #
+  #   agent-stack build    build and load the images only
+  #   agent-stack deploy   apply the overlay (images must already be loaded)
+  #   agent-stack          both
+  local sub="${1:-all}"
+  local SRC="${BUILD_DIR}/template-src"
+  local AGENT_SHA=75072aeb0825553dd04af7c21a2e21d063797ae9
+  local UI_SHA=7a037b5fec170573c77a81db48a3c81a57d6c2d0
+  local NS=template-agent
+
+  _clone() { # _clone <repo> <sha>
+    local repo="$1" sha="$2" dir="${SRC}/$1"
+    if [[ ! -d "${dir}/.git" ]]; then
+      mkdir -p "${SRC}"
+      git clone -q "https://github.com/redhat-data-and-ai/${repo}.git" "${dir}" \
+        || die "could not clone ${repo}"
+    fi
+    git -C "${dir}" fetch -q --depth=1 origin "${sha}" 2>/dev/null || true
+    git -C "${dir}" checkout -q "${sha}" || die "could not check out ${repo}@${sha}"
+  }
+
+  _load() { # _load <image> -- `kind load docker-image` does not see podman's
+            # store, so go through an archive.
+    local img="$1"
+    local tar="${BUILD_DIR}/$(tr '/:' '__' <<<"${img}").tar"
+    "${CE}" save -o "${tar}" "${img}" >/dev/null 2>&1 || die "could not save ${img}"
+    kind load image-archive "${tar}" --name "${CLUSTER_NAME}" >/dev/null 2>&1 \
+      || die "could not load ${img} into ${CLUSTER_NAME}"
+    rm -f "${tar}"
+  }
+
+  if [[ "${sub}" == "all" || "${sub}" == "build" ]]; then
+    need "${CE}"; need git
+    step "cloning template-agent and template-ui at their pinned commits"
+    _clone template-agent "${AGENT_SHA}"
+    _clone template-ui    "${UI_SHA}"
+
+    step "building template-ui"
+    "${CE}" build -q -t localhost/template-ui:local \
+      -f "${SRC}/template-ui/Containerfile" "${SRC}/template-ui" >/dev/null \
+      || die "template-ui build failed"
+
+    step "building template-agent"
+    "${CE}" build -q -t localhost/template-agent:local \
+      -f "${SRC}/template-agent/Containerfile" "${SRC}/template-agent" >/dev/null \
+      || die "template-agent build failed"
+
+    # The agent image ships an empty /app/config/agent: the Containerfile sets
+    # CONFIG_PATH but never copies config in, so the agent exits with
+    # "Missing required config files". The tree is nested, which ConfigMap
+    # keys cannot express, so bake it as a layer.
+    step "baking the agent config layer"
+    printf 'FROM localhost/template-agent:local\nCOPY --chown=65532:root config/agent /app/config/agent\n' \
+      > "${SRC}/Containerfile.config"
+    "${CE}" build -q -t localhost/template-agent:local-config \
+      -f "${SRC}/Containerfile.config" "${SRC}/template-agent" >/dev/null \
+      || die "config layer build failed"
+
+    step "loading images into ${CLUSTER_NAME}"
+    _load localhost/template-agent:local-config
+    _load localhost/template-ui:local
+    ok "images built and loaded"
+  fi
+
+  if [[ "${sub}" == "all" || "${sub}" == "deploy" ]]; then
+    step "deploying the agent stack"
+    kc get namespace "${NS}" >/dev/null 2>&1 || kc create namespace "${NS}" >/dev/null
+    # A tenant, not platform: no platform.kind.local/component label, so
+    # Kyverno polices it in full.
+    kc label namespace "${NS}" \
+      pod-security.kubernetes.io/enforce=baseline \
+      pod-security.kubernetes.io/warn=restricted --overwrite >/dev/null
+
+    # The UI refuses to start without COOKIE_SIGN (>=32 chars) and upstream's
+    # overlay never supplies it. Generated once, reused on re-deploys.
+    local cookie_file="${ROOT_DIR}/.secrets/ui-cookie-sign"
+    [[ -s "${cookie_file}" ]] || { rand_alnum 48 > "${cookie_file}"; chmod 600 "${cookie_file}"; }
+    kc -n "${NS}" create secret generic ui-secrets \
+      --from-literal=COOKIE_SIGN="$(cat "${cookie_file}")" \
+      --dry-run=client -o yaml | kc apply -f - >/dev/null
+
+    kc apply -k "${ROOT_DIR}/apps/template-agent" >/dev/null
+    for d in pgvector redis agent ui; do
+      kc -n "${NS}" rollout status "deployment/${d}" --timeout=300s >/dev/null \
+        || warn "${d} did not become ready"
+    done
+    ok "agent stack ready at https://agent-ui.${BASE_DOMAIN}${URL_SUFFIX}"
+    warn "the agent needs an OpenAI-compatible endpoint to answer prompts:"
+    warn "  kubectl -n ${NS} set env deploy/agent VLLM_BASE_URL=... LLM_API_KEY=..."
+  fi
+}
+
 _usage() {
-  echo "usage: $(basename "$0") <doctor|urls|status|token|seal|break-glass|demo|gitops|push|sign|openshell> [args]" >&2
+  echo "usage: $(basename "$0") <doctor|urls|status|token|seal|break-glass|demo|gitops|push|sign|openshell|agent-stack> [args]" >&2
   exit 2
 }
 [[ $# -ge 1 ]] || _usage
@@ -513,6 +622,7 @@ _sub="$1"; shift
 case "${_sub}" in
   doctor) cmd_doctor "$@" ;;
   openshell) cmd_openshell "$@" ;;
+  agent-stack) cmd_agent_stack "$@" ;;
   urls) cmd_urls "$@" ;;
   status) cmd_status "$@" ;;
   token) cmd_token "$@" ;;

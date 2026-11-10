@@ -107,7 +107,7 @@ rand_alnum() {
   local len="${1:-24}" chars
   chars="$(LC_ALL=C tr -dc 'A-Za-z0-9' < <(head -c 8192 /dev/urandom))"
   [[ ${#chars} -ge ${len} ]] || die "not enough entropy for a ${len}-char secret"
-  printf '%s' "${chars:0:len}"
+  printf '%s' "${chars:0:${len}}"
 }
 
 kc() { kubectl --context "${KUBECONTEXT}" "$@"; }

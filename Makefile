@@ -3,7 +3,7 @@ SHELL := /usr/bin/env bash
 S := ./scripts
 
 .PHONY: help create delete up install all down clean reset status urls smoke token trust-ca untrust-ca \
-        demo demo-load demo-down logs dashboards reinstall gitops-bootstrap push k9s openshell \
+        demo demo-load demo-down logs dashboards reinstall gitops-bootstrap push k9s openshell agent-stack \
         hosts unhosts break-glass seal restore-drill sign lint failover-drill doctor _sudo
 
 help: ## Show this help
@@ -109,6 +109,10 @@ push: ## Push a local image to the cluster registry (IMG=name:tag)
 ##@ Sandboxing
 openshell: ## Fetch the OpenShell client mTLS bundle and port-forward the gateway
 	@$(S)/ops.sh openshell
+
+##@ Workloads (continued)
+agent-stack: ## Build and deploy the Red Hat template-agent + template-ui stack
+	@$(S)/ops.sh agent-stack
 
 ##@ GitOps
 gitops-bootstrap: ## Point Argo CD at a git repo (REPO=https://... [PATH=gitops])

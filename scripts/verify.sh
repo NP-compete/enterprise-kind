@@ -164,6 +164,27 @@ check "sandbox namespace is policed, not exempt" bash -c \
   "! kubectl --context ${KUBECONTEXT} get namespace openshell-sandboxes \
      -o jsonpath='{.metadata.labels}' | grep -q 'platform.kind.local/component'"
 
+echo; log "agent stack"
+if kubectl --context ${KUBECONTEXT} get namespace template-agent >/dev/null 2>&1; then
+  for d in agent ui pgvector redis; do
+    check "template-agent/${d} ready" bash -c \
+      "test \"\$(kubectl --context ${KUBECONTEXT} -n template-agent get deploy ${d} -o jsonpath='{.status.readyReplicas}')\" -ge 1"
+  done
+  check "agent reports healthy (db + langgraph)" bash -c \
+    "kubectl --context ${KUBECONTEXT} get --raw '/api/v1/namespaces/template-agent/services/agent:5002/proxy/health' \
+     | jq -e '.status==\"healthy\" and .database==\"connected\"'"
+  check "agent UI served over platform TLS" bash -c \
+    "test \"\$(curl -sk --max-time 15 --resolve agent-ui.${BASE_DOMAIN}:443:127.0.0.1 \
+       -o /dev/null -w '%{http_code}' https://agent-ui.${BASE_DOMAIN}${suffix}/)\" = 200"
+  # The stack is a tenant: it must NOT carry the platform exemption label,
+  # or Kyverno would stop policing third-party workloads.
+  check "agent namespace is policed, not exempt" bash -c \
+    "! kubectl --context ${KUBECONTEXT} get namespace template-agent \
+       -o jsonpath='{.metadata.labels}' | grep -q 'platform.kind.local/component'"
+else
+  log "  (not deployed -- run 'make agent-stack')"
+fi
+
 echo; log "governance"
 check "Kyverno webhook live" kc get clusterpolicy require-resource-requests
 # Enforcement is proven by admission, not by reading the policy objects.

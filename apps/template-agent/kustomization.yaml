@@ -1,0 +1,199 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: template-agent
+
+# Upstream's kind overlay, rendered at a pinned commit and vendored into
+# upstream.yaml. A remote base would make every apply depend on github.com
+# resolving, which is not a dependency a local platform should have.
+#   template-agent 75072aeb0825553dd04af7c21a2e21d063797ae9
+#   template-ui    7a037b5fec170573c77a81db48a3c81a57d6c2d0 (image only)
+resources:
+  - upstream.yaml
+
+# The agent image ships an EMPTY /app/config/agent: the Containerfile sets
+# CONFIG_PATH but never copies config in, and upstream's kind overlay never
+# mounts it, so the agent exits with "Missing required config files". The
+# config tree is nested, which ConfigMap keys cannot represent, so it is
+# baked into an image layer instead -- which also versions config with code.
+images:
+  - name: localhost/template-agent
+    newTag: local-config
+
+patches:
+  # The UI reads REDIS_HOST from agent-config, but nothing in the upstream
+  # overlay defines it -- the redis component supplies REDIS_URL only. Without
+  # this the UI never leaves CreateContainerConfigError.
+  - target: { kind: ConfigMap, name: agent-config }
+    patch: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata: { name: agent-config }
+      data:
+        REDIS_HOST: redis
+        REDIS_PORT: "6379"
+
+  # --- eval-runner removed -------------------------------------------------
+  # Its image is `eval-runner:latest`, which the enforcing disallow-latest-tag
+  # policy rejects at admission, and nothing builds that image here. It is an
+  # evaluation harness, not part of serving the agent. Build and pin it if you
+  # want promptfoo evals in-cluster.
+  - target: { kind: Deployment, name: eval-runner }
+    patch: |
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: { name: eval-runner }
+  - target: { kind: Service, name: eval-runner }
+    patch: |
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata: { name: eval-runner }
+  - target: { kind: ConfigMap, name: eval-runner-config }
+    patch: |
+      $patch: delete
+      apiVersion: v1
+      kind: ConfigMap
+      metadata: { name: eval-runner-config }
+  - target: { kind: NetworkPolicy, name: eval-runner-internal-only }
+    patch: |
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata: { name: eval-runner-internal-only }
+
+  # --- hostnames -----------------------------------------------------------
+  # Upstream uses *.localhost. This platform deliberately does not: Go and
+  # musl resolve any name ending in .localhost to loopback without consulting
+  # DNS (RFC 6761), so in-cluster calls would dial themselves. Everything here
+  # lives under .kind.test, which CoreDNS and /etc/hosts already route.
+  - target: { kind: Ingress, name: template-agent-ingress }
+    patch: |
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: template-agent-ingress
+        annotations:
+          cert-manager.io/cluster-issuer: platform-ca
+      spec:
+        ingressClassName: nginx
+        tls:
+          - secretName: template-agent-tls
+            hosts: [agent-ui.kind.test, agent.kind.test, jaeger.kind.test]
+        rules:
+          - host: agent-ui.kind.test
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend: { service: { name: ui, port: { number: 8080 } } }
+          - host: agent.kind.test
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend: { service: { name: agent, port: { number: 5002 } } }
+
+  # --- hardening -----------------------------------------------------------
+  # add-default-securitycontext is Audit here, so these would be admitted
+  # as-is. Set explicitly anyway: the policy exists to describe what good
+  # looks like, and a workload that only passes because the rule is advisory
+  # is a workload that breaks the day it is enforced.
+  - target: { kind: Deployment, name: agent }
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: { name: agent }
+      spec:
+        template:
+          spec:
+            containers:
+              - name: agent
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities: { drop: ["ALL"] }
+  - target: { kind: Deployment, name: ui }
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: { name: ui }
+      spec:
+        template:
+          spec:
+            containers:
+              - name: ui
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities: { drop: ["ALL"] }
+
+  # --- pgvector and redis run as root ---------------------------------------
+  # Both components set runAsNonRoot: true but their images start as root and
+  # step down internally, so the kubelet refuses them outright:
+  #   "container has runAsNonRoot and image will run as root"
+  # Pinning the UID the images actually use satisfies the check, and fsGroup
+  # gives them ownership of the PVC they write to.
+  - target: { kind: Deployment, name: pgvector }
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: { name: pgvector }
+      spec:
+        template:
+          spec:
+            securityContext:
+              runAsUser: 999
+              runAsGroup: 999
+              fsGroup: 999
+              runAsNonRoot: true
+  - target: { kind: Deployment, name: redis }
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: { name: redis }
+      spec:
+        template:
+          spec:
+            securityContext:
+              runAsUser: 999
+              runAsGroup: 1000
+              fsGroup: 1000
+              runAsNonRoot: true
+
+  # --- UI session signing key -----------------------------------------------
+  # The UI refuses to start without COOKIE_SIGN (>=32 chars), and nothing in
+  # upstream's overlay supplies it -- it appears only in template-ui's
+  # env.template. Generated per install into the ui-secrets Secret by
+  # scripts/ops.sh agent-stack, never committed.
+  - target: { kind: Deployment, name: ui }
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: { name: ui }
+      spec:
+        template:
+          spec:
+            containers:
+              - name: ui
+                env:
+                  - name: COOKIE_SIGN
+                    valueFrom:
+                      secretKeyRef: { name: ui-secrets, key: COOKIE_SIGN }
+
+  # --- agent memory ----------------------------------------------------------
+  # Upstream caps the agent at 512Mi and it is OOMKilled (exit 137) during
+  # startup, after config load but before the health endpoint comes up: it
+  # imports langgraph plus the whole model stack. Measured steady state is
+  # ~560Mi, so 1Gi limit leaves headroom without the 3x overshoot.
+  - target: { kind: Deployment, name: agent }
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: { name: agent }
+      spec:
+        template:
+          spec:
+            containers:
+              - name: agent
+                resources:
+                  requests: { cpu: 100m, memory: 512Mi }
+                  limits: { cpu: "1", memory: 1Gi }

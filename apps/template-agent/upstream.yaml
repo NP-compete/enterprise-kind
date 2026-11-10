@@ -1,0 +1,847 @@
+# Generated — do not edit. Upstream's kind overlay, rendered and vendored so
+# deploying does not depend on github.com resolving at apply time.
+#
+#   source: github.com/redhat-data-and-ai/template-agent
+#           deployment/overlays/kind
+#   commit: 75072aeb0825553dd04af7c21a2e21d063797ae9
+#
+# Regenerate:
+#   git clone --depth=1 https://github.com/redhat-data-and-ai/template-agent
+#   kubectl kustomize template-agent/deployment/overlays/kind
+#
+# Patches live in kustomization.yaml alongside this file; keep fixes there so
+# a regenerate does not silently drop them.
+apiVersion: v1
+data:
+  CONFIG_PATH: /app/config/agent
+  EVAL_RUNNER_URL: http://eval-runner:8099
+  POSTGRES_DB: template_agent
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  REDIS_URL: redis://redis:6379/0
+kind: ConfigMap
+metadata:
+  labels:
+    app: template-agent
+  name: agent-config
+  namespace: template-agent
+---
+apiVersion: v1
+data:
+  AGENT_CONFIG_DIR: /agent-config
+kind: ConfigMap
+metadata:
+  labels:
+    app: template-agent
+  name: eval-runner-config
+  namespace: template-agent
+---
+apiVersion: v1
+data:
+  init-databases.sql: |
+    CREATE DATABASE mcp_server;
+kind: ConfigMap
+metadata:
+  labels:
+    app: template-agent
+    component: database
+  name: postgres-init
+  namespace: template-agent
+---
+apiVersion: v1
+data:
+  ui.yaml: |
+    server:
+      host: "0.0.0.0"
+      port: 8080
+      body_limit: 1048576
+    logging:
+      level: info
+    cors:
+      origin: "http://localhost:5173"
+    security:
+      helmet:
+        enabled: true
+        csp:
+          default_src: ["'self'"]
+          script_src: ["'self'", "'unsafe-inline'"]
+          style_src: ["'self'", "'unsafe-inline'"]
+          img_src: ["'self'", "data:", "blob:"]
+          connect_src: ["'self'"]
+          font_src: ["'self'"]
+          object_src: ["'none'"]
+          frame_ancestors: ["'none'"]
+        cross_origin_embedder_policy: false
+      rate_limit:
+        enabled: true
+        max: 100
+        window: "1 minute"
+        exclude_paths:
+          - "/api/health"
+          - "/_health"
+      session:
+        secure_cookie: false
+        max_age_days: 30
+    otel:
+      enabled: false
+      service_name: "template-ui"
+    announcement:
+      enabled: false
+      message: ""
+      type: info
+kind: ConfigMap
+metadata:
+  labels:
+    app: template-agent
+    component: ui
+  name: ui-config
+  namespace: template-agent
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    app: template-agent
+  name: agent-secrets
+  namespace: template-agent
+stringData:
+  GOOGLE_APPLICATION_CREDENTIALS_CONTENT: ""
+  LANGFUSE_BASE_URL: ""
+  LANGFUSE_PUBLIC_KEY: ""
+  LANGFUSE_SECRET_KEY: ""
+  POSTGRES_PASSWORD: postgres
+  POSTGRES_USER: postgres
+  SSO_CLIENT_ID: ""
+  SSO_CLIENT_SECRET: ""
+  SSO_ISSUER_URL: ""
+  VLLM_API_KEY: ""
+  VLLM_BASE_URL: ""
+type: Opaque
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: template-agent
+    component: agent
+  name: agent
+  namespace: template-agent
+spec:
+  ports:
+  - name: http
+    port: 5002
+    protocol: TCP
+    targetPort: 5002
+  selector:
+    app: agent
+    component: agent
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: template-agent
+    component: eval-runner
+  name: eval-runner
+  namespace: template-agent
+spec:
+  ports:
+  - name: http
+    port: 8099
+    protocol: TCP
+    targetPort: 8099
+  selector:
+    app: eval-runner
+    component: eval-runner
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: template-agent
+    component: database
+  name: postgres
+  namespace: template-agent
+spec:
+  ports:
+  - name: postgres
+    port: 5432
+    protocol: TCP
+    targetPort: 5432
+  selector:
+    component: database
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: template-agent
+    component: cache
+  name: redis
+  namespace: template-agent
+spec:
+  ports:
+  - name: redis
+    port: 6379
+    protocol: TCP
+    targetPort: 6379
+  selector:
+    component: cache
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: template-agent
+    component: ui
+  name: ui
+  namespace: template-agent
+spec:
+  ports:
+  - name: http
+    port: 8080
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    component: ui
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  annotations:
+    kubernetes.io/reclaimPolicy: Delete
+  labels:
+    app: template-agent
+    component: database
+  name: postgres-pvc
+  namespace: template-agent
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  annotations:
+    kubernetes.io/reclaimPolicy: Delete
+  labels:
+    app: template-agent
+    component: cache
+  name: redis-pvc
+  namespace: template-agent
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: template-agent
+    component: agent
+  name: agent
+  namespace: template-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent
+      component: agent
+  template:
+    metadata:
+      labels:
+        app: agent
+        component: agent
+    spec:
+      containers:
+      - env:
+        - name: AGENT_HOST
+          value: 0.0.0.0
+        - name: AGENT_PORT
+          value: "5002"
+        - name: PYTHON_LOG_LEVEL
+          value: INFO
+        - name: POSTGRES_HOST
+          valueFrom:
+            configMapKeyRef:
+              key: POSTGRES_HOST
+              name: agent-config
+        - name: POSTGRES_PORT
+          valueFrom:
+            configMapKeyRef:
+              key: POSTGRES_PORT
+              name: agent-config
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              key: POSTGRES_DB
+              name: agent-config
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              key: POSTGRES_USER
+              name: agent-secrets
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: POSTGRES_PASSWORD
+              name: agent-secrets
+        - name: REDIS_URL
+          valueFrom:
+            configMapKeyRef:
+              key: REDIS_URL
+              name: agent-config
+        - name: EVAL_RUNNER_URL
+          valueFrom:
+            configMapKeyRef:
+              key: EVAL_RUNNER_URL
+              name: agent-config
+              optional: true
+        - name: GOOGLE_APPLICATION_CREDENTIALS_CONTENT
+          valueFrom:
+            secretKeyRef:
+              key: GOOGLE_APPLICATION_CREDENTIALS_CONTENT
+              name: agent-secrets
+              optional: true
+        - name: LANGFUSE_PUBLIC_KEY
+          valueFrom:
+            secretKeyRef:
+              key: LANGFUSE_PUBLIC_KEY
+              name: agent-secrets
+              optional: true
+        - name: LANGFUSE_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              key: LANGFUSE_SECRET_KEY
+              name: agent-secrets
+              optional: true
+        - name: LANGFUSE_BASE_URL
+          valueFrom:
+            secretKeyRef:
+              key: LANGFUSE_BASE_URL
+              name: agent-secrets
+              optional: true
+        image: localhost/template-agent:local
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /live
+            port: 5002
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        name: agent
+        ports:
+        - containerPort: 5002
+          name: http
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /health
+            port: 5002
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        startupProbe:
+          failureThreshold: 30
+          httpGet:
+            path: /health
+            port: 5002
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      restartPolicy: Always
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: template-agent
+    component: eval-runner
+  name: eval-runner
+  namespace: template-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: eval-runner
+      component: eval-runner
+  template:
+    metadata:
+      labels:
+        app: eval-runner
+        component: eval-runner
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - env:
+        - name: AGENT_CONFIG_DIR
+          valueFrom:
+            configMapKeyRef:
+              key: AGENT_CONFIG_DIR
+              name: eval-runner-config
+        - name: AGENT_HOST
+          value: http://agent:5002
+        - name: POSTGRES_HOST
+          valueFrom:
+            configMapKeyRef:
+              key: POSTGRES_HOST
+              name: agent-config
+        - name: POSTGRES_PORT
+          valueFrom:
+            configMapKeyRef:
+              key: POSTGRES_PORT
+              name: agent-config
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              key: POSTGRES_DB
+              name: agent-config
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              key: POSTGRES_USER
+              name: agent-secrets
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: POSTGRES_PASSWORD
+              name: agent-secrets
+        - name: EVAL_INTERNAL_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: EVAL_INTERNAL_TOKEN
+              name: agent-secrets
+        image: eval-runner:latest
+        imagePullPolicy: Never
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /health
+            port: 8099
+          initialDelaySeconds: 30
+          periodSeconds: 15
+          timeoutSeconds: 5
+        name: eval-runner
+        ports:
+        - containerPort: 8099
+          name: http
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /health
+            port: 8099
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        startupProbe:
+          failureThreshold: 12
+          httpGet:
+            path: /health
+            port: 8099
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - mountPath: /agent-config
+          name: agent-config
+          readOnly: true
+        - mountPath: /tmp
+          name: tmp
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+      - emptyDir:
+          sizeLimit: 256Mi
+        name: tmp
+      - name: agent-config
+        persistentVolumeClaim:
+          claimName: agent-source-data
+          readOnly: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: template-agent
+    component: database
+  name: pgvector
+  namespace: template-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      component: database
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        component: database
+    spec:
+      containers:
+      - env:
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              key: POSTGRES_USER
+              name: agent-secrets
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: POSTGRES_PASSWORD
+              name: agent-secrets
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              key: POSTGRES_DB
+              name: agent-config
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        image: pgvector/pgvector:pg16
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - pgvector
+          failureThreshold: 3
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        name: pgvector
+        ports:
+        - containerPort: 5432
+          name: postgres
+          protocol: TCP
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - pgvector
+          failureThreshold: 3
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+        volumeMounts:
+        - mountPath: /var/lib/postgresql/data
+          name: postgres-data
+        - mountPath: /docker-entrypoint-initdb.d
+          name: postgres-init
+      restartPolicy: Always
+      volumes:
+      - name: postgres-data
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+      - configMap:
+          name: postgres-init
+        name: postgres-init
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: template-agent
+    component: cache
+  name: redis
+  namespace: template-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      component: cache
+  template:
+    metadata:
+      labels:
+        component: cache
+    spec:
+      containers:
+      - command:
+        - redis-server
+        - --appendonly
+        - "no"
+        - --save
+        - 60 1
+        - --maxmemory
+        - 256mb
+        - --maxmemory-policy
+        - allkeys-lru
+        image: redis:7-alpine
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          failureThreshold: 3
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        name: redis
+        ports:
+        - containerPort: 6379
+          name: redis
+          protocol: TCP
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          failureThreshold: 3
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+        resources:
+          limits:
+            cpu: 250m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+        volumeMounts:
+        - mountPath: /data
+          name: redis-data
+      initContainers:
+      - command:
+        - sh
+        - -c
+        - |
+          rm -rf /data/appendonlydir
+          if [ -f /data/dump.rdb ]; then
+            if redis-check-rdb /data/dump.rdb > /dev/null 2>&1; then
+              echo "RDB file valid"
+            else
+              echo "RDB file corrupt — removing"
+              rm -f /data/dump.rdb
+            fi
+          fi
+        image: redis:7-alpine
+        name: validate-rdb
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+        volumeMounts:
+        - mountPath: /data
+          name: redis-data
+      restartPolicy: Always
+      volumes:
+      - name: redis-data
+        persistentVolumeClaim:
+          claimName: redis-pvc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: template-agent
+    component: ui
+  name: ui
+  namespace: template-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      component: ui
+  template:
+    metadata:
+      labels:
+        app: template-agent
+        component: ui
+    spec:
+      containers:
+      - env:
+        - name: PORT
+          value: "8080"
+        - name: ENVIRONMENT
+          value: development
+        - name: AUTH_ENABLED
+          value: "false"
+        - name: AGENT_HOST
+          value: http://agent:5002
+        - name: UI_CONFIG_PATH
+          value: /etc/config/ui.yaml
+        - name: REDIS_HOST
+          valueFrom:
+            configMapKeyRef:
+              key: REDIS_HOST
+              name: agent-config
+        - name: REDIS_PORT
+          valueFrom:
+            configMapKeyRef:
+              key: REDIS_PORT
+              name: agent-config
+        image: localhost/template-ui:local
+        imagePullPolicy: Never
+        name: ui
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: 250m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        volumeMounts:
+        - mountPath: /etc/config
+          name: ui-config
+          readOnly: true
+      volumes:
+      - configMap:
+          name: ui-config
+        name: ui-config
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  labels:
+    app: template-agent
+  name: template-agent-ingress
+  namespace: template-agent
+spec:
+  rules:
+  - host: ui.localhost
+    http:
+      paths:
+      - backend:
+          service:
+            name: ui
+            port:
+              number: 8080
+        path: /
+        pathType: Prefix
+  - host: agent.localhost
+    http:
+      paths:
+      - backend:
+          service:
+            name: agent
+            port:
+              number: 5002
+        path: /
+        pathType: Prefix
+  - host: jaeger.localhost
+    http:
+      paths:
+      - backend:
+          service:
+            name: jaeger
+            port:
+              number: 16686
+        path: /
+        pathType: Prefix
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app: template-agent
+    component: eval-runner
+  name: eval-runner-internal-only
+  namespace: template-agent
+spec:
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: agent
+    ports:
+    - port: 8099
+      protocol: TCP
+  - from:
+    - podSelector:
+        matchLabels:
+          component: ui
+    ports:
+    - port: 8099
+      protocol: TCP
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: keda
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: keda-add-ons
+    ports:
+    - port: 8099
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app: eval-runner
+  policyTypes:
+  - Ingress

@@ -4,6 +4,28 @@
 # Usage: host-setup.sh <hosts|trust-ca> [args]
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+
+# Elevate without a terminal. `sudo` needs a TTY to prompt, and this is often
+# run from an editor or wrapper that has none -- which fails with "a terminal
+# is required to read the password" rather than asking. On macOS, osascript
+# raises the native authorisation dialog instead, the same way the keychain
+# prompt in trust-ca already does.
+_sudo_cp() { # _sudo_cp <src> <dst>
+  if sudo -n true 2>/dev/null; then
+    sudo cp "$1" "$2"; return
+  fi
+  if [[ -t 0 ]]; then
+    sudo cp "$1" "$2"; return
+  fi
+  if command -v osascript >/dev/null 2>&1; then
+    log "no terminal for sudo; asking for authorisation with a dialog"
+    osascript -e "do shell script \"cp '$1' '$2'\" with administrator privileges" >/dev/null \
+      || die "authorisation cancelled or failed"
+    return
+  fi
+  die "need root to write $2 and there is no terminal for sudo; run 'make hosts' in a terminal"
+}
+
 cmd_hosts() {
 # Points the platform hostnames at 127.0.0.1 in /etc/hosts.
 #
@@ -42,7 +64,7 @@ case "${1:-add}" in
     tmp="$(mktemp)"
     sed "/^${BEGIN}\$/,/^${END}\$/d" "${HOSTS_FILE}" > "${tmp}"
     entries >> "${tmp}"
-    sudo cp "${tmp}" "${HOSTS_FILE}"
+    _sudo_cp "${tmp}" "${HOSTS_FILE}"
     rm -f "${tmp}"
     ok "added $(wc -w <<<"${PLATFORM_HOSTS}" | tr -d ' ') hostnames for ${BASE_DOMAIN}"
     ;;
@@ -50,7 +72,7 @@ case "${1:-add}" in
     log "removing the kind platform block from ${HOSTS_FILE} (sudo required)"
     tmp="$(mktemp)"
     sed "/^${BEGIN}\$/,/^${END}\$/d" "${HOSTS_FILE}" > "${tmp}"
-    sudo cp "${tmp}" "${HOSTS_FILE}"
+    _sudo_cp "${tmp}" "${HOSTS_FILE}"
     rm -f "${tmp}"
     ok "removed"
     ;;
