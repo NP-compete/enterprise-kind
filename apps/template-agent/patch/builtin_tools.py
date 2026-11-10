@@ -4,12 +4,21 @@ Upstream template-agent gets every tool over MCP. This module adds tools
 that live in the agent itself, assembled alongside the MCP ones in
 deep_agent/aegra/graph.py.
 
-openshell_run_code executes a snippet inside a disposable OpenShell
-Sandbox (agents.x-k8s.io). One sandbox per call, deleted afterwards, so
-nothing persists between invocations and nothing the model writes to disk
-survives. The pod mounts no service account token, runs non-root with all
-capabilities dropped, and is covered by a default-deny egress
-NetworkPolicy (DNS only) shipped alongside this tool.
+The sandbox itself is a `deepagents.backends.sandbox.BaseSandbox`
+subclass, after langchain-ai/openshell-deepagent's backend.py. That base
+class already implements read, write, edit, delete, ls, grep and glob --
+all of them on top of a single primitive, `execute()` -- so the only
+things that are ours are the three abstract members: `execute()`,
+`upload_files()` and `download_files()`. Everything the tools below do
+with files goes through the inherited implementations rather than a
+hand-written `head -c` or `ls -la`, which is where pagination, encoding
+detection, binary handling and the standard error codes come from.
+
+Execution lands in a long-lived OpenShell Sandbox (agents.x-k8s.io): one
+session reused across calls, so state persists until it is reset. The pod
+mounts no service account token, runs non-root with all capabilities
+dropped, and is covered by a default-deny egress NetworkPolicy (DNS only)
+shipped alongside this tool.
 
 That policy is ours: OpenShell's own only selects the pods its gateway
 manages and only restricts Ingress, so without it these sandboxes had
@@ -20,22 +29,30 @@ implements them.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
+import posixpath
 import shlex
 import threading
 import time
 import uuid
 
+from deepagents.backends.protocol import (
+    ExecuteResponse,
+    FileDownloadResponse,
+    FileUploadResponse,
+)
+from deepagents.backends.sandbox import BaseSandbox
 from langchain_core.tools import tool
+
 
 # Per-run records on the agent's own stdout, which Alloy ships to Loki.
 #
 # The sandbox pod cannot provide these: its container runs `sleep` and the
-# snippet is delivered over exec, whose output never reaches pod stdout --
-# and the pod is deleted seconds later anyway. Querying Loki for the
-# sandbox container returns nothing at all. If a run is to be visible
-# afterwards, the tool has to say so itself.
+# snippet is delivered over exec, whose output never reaches pod stdout.
+# Querying Loki for the sandbox container returns nothing at all. If a run
+# is to be visible afterwards, the tool has to say so itself.
 def _emit(event: str, **fields) -> None:
     """One JSON line per run event, keyed by run_id so runs stay separable.
 
@@ -50,6 +67,7 @@ def _emit(event: str, **fields) -> None:
     except Exception:  # noqa: BLE001 - logging must never break a run
         pass
 
+
 NAMESPACE = os.environ.get("SANDBOX_NAMESPACE", "template-agent")
 IMAGE = os.environ.get("SANDBOX_IMAGE", "docker.io/library/python:3.12-slim")
 READY_TIMEOUT = int(os.environ.get("SANDBOX_READY_TIMEOUT", "120"))
@@ -61,15 +79,20 @@ SANDBOX_HOSTNAME = os.environ.get("SANDBOX_HOSTNAME", "openshell-sandbox")
 # wrote. Set SANDBOX_NAME to pin a specific one.
 SESSION_NAME = os.environ.get("SANDBOX_NAME", "openshell-session")
 SESSION_IDLE_TTL = int(os.environ.get("SANDBOX_IDLE_TTL", "3600"))
+# Where relative paths resolve and where commands run. The image's root
+# filesystem is not writable by uid 1000, so a working directory has to be
+# somewhere the sandbox user owns.
+WORKDIR = os.environ.get("SANDBOX_WORKDIR", "/tmp/session")
+DEFAULT_TIMEOUT = int(os.environ.get("SANDBOX_EXEC_TIMEOUT", "120"))
 
 _session_lock = threading.Lock()
 
 GROUP, VERSION, PLURAL = "agents.x-k8s.io", "v1beta1", "sandboxes"
-INTERPRETERS = {
-    "python": ["python3", "-c"],
-    "bash": ["/bin/sh", "-c"],
-    "sh": ["/bin/sh", "-c"],
-}
+INTERPRETERS = {"python", "bash", "sh"}
+# One exec carries at most this much base64 in its argv. Linux caps a whole
+# argv at ~2 MiB; staying well under it means a large upload is split across
+# several appends rather than failing with E2BIG.
+_UPLOAD_CHUNK = 256 * 1024
 
 
 def _clients():
@@ -165,78 +188,244 @@ def _wait_for_pod(core, name: str) -> str:
     raise TimeoutError(f"sandbox not ready within {READY_TIMEOUT}s ({last})")
 
 
-def _ensure_session(core, custom) -> str:
-    """Return the pod name of the shared sandbox, creating it if needed.
+class OpenShellSandbox(BaseSandbox):
+    """An OpenShell Sandbox pod driven through the Kubernetes exec API.
 
-    Serialised: two concurrent tool calls would otherwise both decide the
-    sandbox is missing and race to create it, and the loser gets a
-    409 AlreadyExists that surfaces to the model as a tool failure.
+    `BaseSandbox` supplies every file operation on top of `execute()`, so
+    only the three abstract members are implemented here. Commands run in
+    `WORKDIR` inside a long-lived session pod that is created on first use
+    and reused until `reset()`.
     """
-    from kubernetes.client.rest import ApiException
 
-    with _session_lock:
-        pods = core.list_namespaced_pod(
-            NAMESPACE, label_selector=f"sandbox={SESSION_NAME}"
-        ).items
-        running = [p for p in pods if p.status.phase == "Running"]
-        if running:
-            return running[0].metadata.name
+    # The capture wrapper assumes a shell and coreutils the base class does
+    # not guarantee. python:3.12-slim has both, but output already passes
+    # through the exec websocket, so there is nothing to gain by capturing
+    # at the source; left off.
+    enable_capture_offload = False
 
-        # Clear a dead sandbox before recreating, or the name collides.
-        try:
-            custom.get_namespaced_custom_object(
-                GROUP, VERSION, NAMESPACE, PLURAL, SESSION_NAME
+    @property
+    def id(self) -> str:
+        return f"{NAMESPACE}/{SESSION_NAME}"
+
+    # -- session -------------------------------------------------------
+
+    def _session(self) -> tuple:
+        """Return (CoreV1Api, pod name) for the shared sandbox.
+
+        Serialised: two concurrent tool calls would otherwise both decide
+        the sandbox is missing and race to create it, and the loser gets a
+        409 AlreadyExists that surfaces to the model as a tool failure.
+        """
+        from kubernetes.client.rest import ApiException
+
+        core, custom = _clients()
+        with _session_lock:
+            pods = core.list_namespaced_pod(
+                NAMESPACE, label_selector=f"sandbox={SESSION_NAME}"
+            ).items
+            running = [p for p in pods if p.status.phase == "Running"]
+            if running:
+                return core, running[0].metadata.name
+
+            # Clear a dead sandbox before recreating, or the name collides.
+            try:
+                custom.get_namespaced_custom_object(
+                    GROUP, VERSION, NAMESPACE, PLURAL, SESSION_NAME
+                )
+                custom.delete_namespaced_custom_object(
+                    GROUP, VERSION, NAMESPACE, PLURAL, SESSION_NAME
+                )
+                for _ in range(30):
+                    if not core.list_namespaced_pod(
+                        NAMESPACE, label_selector=f"sandbox={SESSION_NAME}"
+                    ).items:
+                        break
+                    time.sleep(2)
+            except ApiException as exc:
+                if exc.status != 404:
+                    raise
+
+            _emit("openshell_session_create", session=SESSION_NAME)
+            custom.create_namespaced_custom_object(
+                GROUP, VERSION, NAMESPACE, PLURAL, _manifest(SESSION_NAME)
             )
-            custom.delete_namespaced_custom_object(
-                GROUP, VERSION, NAMESPACE, PLURAL, SESSION_NAME
-            )
-            for _ in range(30):
-                if not core.list_namespaced_pod(
-                    NAMESPACE, label_selector=f"sandbox={SESSION_NAME}"
-                ).items:
-                    break
-                time.sleep(2)
-        except ApiException as exc:
-            if exc.status != 404:
-                raise
+            pod = _wait_for_pod(core, SESSION_NAME)
 
-        _emit("openshell_session_create", session=SESSION_NAME)
-        custom.create_namespaced_custom_object(
-            GROUP, VERSION, NAMESPACE, PLURAL, _manifest(SESSION_NAME)
+        self._raw(core, pod, ["/bin/sh", "-c", f"mkdir -p {shlex.quote(WORKDIR)}"], 30)
+        return core, pod
+
+    def reset(self) -> str:
+        """Delete the session pod; the next call creates a fresh one."""
+        from kubernetes.client.rest import ApiException
+
+        _, custom = _clients()
+        with _session_lock:
+            try:
+                custom.delete_namespaced_custom_object(
+                    GROUP, VERSION, NAMESPACE, PLURAL, SESSION_NAME)
+            except ApiException as exc:
+                if exc.status != 404:
+                    raise
+        _emit("openshell_session_reset", session=SESSION_NAME)
+        return "sandbox destroyed; the next call will start a fresh one"
+
+    # -- the exec primitive --------------------------------------------
+
+    @staticmethod
+    def _raw(core, pod: str, argv: list[str], timeout_s: int) -> tuple[str, str, int | None]:
+        """Run argv in the session pod, returning (stdout, stderr, exit code).
+
+        The exit code arrives on the websocket's error channel as a status
+        object once the process ends; there is no other way to see it, and
+        `BaseSandbox` relies on it to tell a failed command from one that
+        legitimately printed nothing.
+        """
+        from kubernetes import stream
+        from kubernetes.stream.ws_client import ERROR_CHANNEL
+
+        resp = stream.stream(
+            core.connect_get_namespaced_pod_exec, pod, NAMESPACE,
+            command=argv, container="openshell",
+            stderr=True, stdout=True, stdin=False, tty=False,
+            _preload_content=False,
         )
-        return _wait_for_pod(core, SESSION_NAME)
+        out: list[str] = []
+        err: list[str] = []
+        deadline = time.time() + timeout_s
+        timed_out = False
+        while resp.is_open():
+            if time.time() > deadline:
+                timed_out = True
+                break
+            resp.update(timeout=1)
+            if resp.peek_stdout():
+                out.append(resp.read_stdout())
+            if resp.peek_stderr():
+                err.append(resp.read_stderr())
 
-
-def _exec(core, pod: str, argv: list[str], timeout_s: int) -> tuple[str, bool]:
-    """Run argv in the sandbox, returning (combined output, timed_out)."""
-    from kubernetes import stream
-
-    resp = stream.stream(
-        core.connect_get_namespaced_pod_exec, pod, NAMESPACE,
-        command=argv, container="openshell",
-        stderr=True, stdout=True, stdin=False, tty=False,
-        _preload_content=False,
-    )
-    out: list[str] = []
-    err: list[str] = []
-    deadline = time.time() + timeout_s
-    timed_out = False
-    while resp.is_open():
-        if time.time() > deadline:
-            timed_out = True
-            resp.close()
-            break
-        resp.update(timeout=1)
-        if resp.peek_stdout():
-            out.append(resp.read_stdout())
-        if resp.peek_stderr():
-            err.append(resp.read_stderr())
-    if not timed_out:
+        exit_code: int | None = None
+        if timed_out:
+            err.append(f"\n[timed out after {timeout_s}s]")
+            exit_code = 124
+        else:
+            try:
+                status = json.loads(resp.read_channel(ERROR_CHANNEL) or "{}")
+            except (ValueError, TypeError):
+                status = {}
+            if status.get("status") == "Success":
+                exit_code = 0
+            else:
+                for cause in (status.get("details") or {}).get("causes") or []:
+                    if cause.get("reason") == "ExitCode":
+                        try:
+                            exit_code = int(cause.get("message"))
+                        except (TypeError, ValueError):
+                            exit_code = None
         resp.close()
-    body = "".join(out)
-    if err:
-        body += "\n--- stderr ---\n" + "".join(err)
-    return body, timed_out
+        return "".join(out), "".join(err), exit_code
+
+    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        """Run a shell command in the sandbox's working directory.
+
+        Args:
+            command: Full shell command string.
+            timeout: Seconds to allow. Defaults to SANDBOX_EXEC_TIMEOUT.
+
+        Returns:
+            `ExecuteResponse` with combined stdout and stderr.
+        """
+        timeout_s = max(1, min(int(timeout or DEFAULT_TIMEOUT), 600))
+        core, pod = self._session()
+        argv = ["/bin/sh", "-c", f"cd {shlex.quote(WORKDIR)} 2>/dev/null || cd /tmp\n{command}"]
+        out, err, code = self._raw(core, pod, argv, timeout_s)
+        # stdout first and stderr only when it is non-empty: the base class
+        # parses the stdout of its own helper scripts as JSON, and anything
+        # prepended or interleaved would make a successful read look like a
+        # malformed server response.
+        body = out + (("\n" + err) if err.strip() else "")
+        truncated = len(body) > MAX_OUTPUT
+        if truncated:
+            body = f"{body[:MAX_OUTPUT]}\n...[truncated, {len(body) - MAX_OUTPUT} more bytes]"
+        return ExecuteResponse(output=body, exit_code=code, truncated=truncated)
+
+    # -- file transfer -------------------------------------------------
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        """Write files into the sandbox, creating parent directories.
+
+        Content travels as base64 in the command line rather than over the
+        exec stdin channel: closing that channel to signal EOF also tears
+        down the websocket, which races the receiving process. Appending
+        bounded chunks has no such race.
+        """
+        responses: list[FileUploadResponse] = []
+        for path, content in files:
+            target = _abs(path)
+            try:
+                blob = base64.b64encode(content).decode("ascii")
+                staged = f"{target}.upload.{uuid.uuid4().hex[:8]}"
+                q, s = shlex.quote(target), shlex.quote(staged)
+                script = [f"mkdir -p {shlex.quote(posixpath.dirname(target) or '/')}", f": > {s}"]
+                for i in range(0, len(blob), _UPLOAD_CHUNK):
+                    script.append(f"printf %s '{blob[i:i + _UPLOAD_CHUNK]}' >> {s}")
+                script.append(f"base64 -d {s} > {q}")
+                script.append(f"rm -f {s}")
+                result = self.execute("\n".join(script))
+                responses.append(
+                    FileUploadResponse(path=path)
+                    if result.exit_code == 0
+                    else FileUploadResponse(path=path, error=_file_error(result.output))
+                )
+            except Exception as exc:  # noqa: BLE001 - partial success is the contract
+                responses.append(FileUploadResponse(path=path, error=f"{type(exc).__name__}: {exc}"))
+        return responses
+
+    def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        """Read files out of the sandbox as bytes."""
+        responses: list[FileDownloadResponse] = []
+        for path in paths:
+            target = _abs(path)
+            try:
+                result = self.execute(f"base64 < {shlex.quote(target)}")
+                if result.exit_code != 0 or result.truncated:
+                    detail = "file too large to download" if result.truncated else result.output
+                    responses.append(FileDownloadResponse(path=path, error=_file_error(detail)))
+                    continue
+                responses.append(
+                    FileDownloadResponse(path=path, content=base64.b64decode(result.output))
+                )
+            except Exception as exc:  # noqa: BLE001 - partial success is the contract
+                responses.append(FileDownloadResponse(path=path, error=f"{type(exc).__name__}: {exc}"))
+        return responses
+
+
+def _file_error(detail: str) -> str:
+    """Map a shell failure onto the standard FileOperationError codes."""
+    low = (detail or "").lower()
+    if "no such file" in low:
+        return "file_not_found"
+    if "permission denied" in low or "read-only file system" in low:
+        return "permission_denied"
+    if "is a directory" in low:
+        return "is_directory"
+    return (detail or "unknown error").strip()[:200]
+
+
+def _abs(path: str) -> str:
+    """Resolve a path the model supplied against the sandbox working dir."""
+    path = (path or ".").strip()
+    return path if posixpath.isabs(path) else posixpath.normpath(posixpath.join(WORKDIR, path))
+
+
+_sandbox: OpenShellSandbox | None = None
+
+
+def get_sandbox() -> OpenShellSandbox:
+    """The process-wide sandbox backend."""
+    global _sandbox
+    if _sandbox is None:
+        _sandbox = OpenShellSandbox()
+    return _sandbox
 
 
 def _truncate(text: str) -> str:
@@ -272,29 +461,20 @@ def openshell_run_code(code: str, language: str = "python", timeout_s: int = 60)
         return "error: no code supplied"
     timeout_s = max(1, min(int(timeout_s or 60), 300))
 
-    from kubernetes.client.rest import ApiException
-
     run_id = uuid.uuid4().hex[:8]
     started = time.time()
     _emit("openshell_run_started", run_id=run_id, session=SESSION_NAME,
           language=lang, timeout_s=timeout_s, code_bytes=len(code),
           code_preview=code[:400])
     try:
-        core, custom = _clients()
-        pod = _ensure_session(core, custom)
-        body, timed_out = _exec(core, pod, INTERPRETERS[lang] + [code], timeout_s)
-        if timed_out:
-            body += f"\n[timed out after {timeout_s}s]"
+        command = f"python3 -c {shlex.quote(code)}" if lang == "python" else code
+        result = get_sandbox().execute(command, timeout=timeout_s)
         _emit("openshell_run_finished", run_id=run_id, session=SESSION_NAME,
-              language=lang, status="timeout" if timed_out else "ok",
+              language=lang, status="ok" if result.exit_code == 0 else "error",
+              exit_code=result.exit_code,
               duration_s=round(time.time() - started, 3),
-              output_preview=_truncate(body)[:800])
-        return _truncate(body) or "(no output)"
-    except ApiException as exc:
-        _emit("openshell_run_finished", run_id=run_id, session=SESSION_NAME,
-              status="error", duration_s=round(time.time() - started, 3),
-              error=f"kubernetes API {exc.status} {exc.reason}")
-        return f"error: kubernetes API {exc.status} {exc.reason}"
+              output_preview=result.output[:800])
+        return result.output or "(no output)"
     except Exception as exc:  # noqa: BLE001 - returned to the model, not swallowed
         _emit("openshell_run_finished", run_id=run_id, session=SESSION_NAME,
               status="error", duration_s=round(time.time() - started, 3),
@@ -307,43 +487,36 @@ def openshell_write_file(path: str, content: str) -> str:
     """Write a text file inside the sandbox, creating parent directories.
 
     Args:
-        path: Absolute or relative path inside the sandbox.
+        path: Absolute path, or one relative to the sandbox working directory.
         content: File contents.
     """
     try:
-        core, custom = _clients()
-        pod = _ensure_session(core, custom)
-        script = (
-            f"mkdir -p {shlex.quote(os.path.dirname(path) or '.')} && "
-            f"cat > {shlex.quote(path)} <<'__OS_EOF__'\n{content}\n__OS_EOF__\n"
-            f"wc -c < {shlex.quote(path)}"
-        )
-        body, timed_out = _exec(core, pod, ["/bin/sh", "-c", script], 60)
-        if timed_out:
-            return f"error: timed out writing {path}"
-        _emit("openshell_file_write", session=SESSION_NAME, path=path,
+        result = get_sandbox().write(_abs(path), content)
+        if result.error:
+            return f"error: {result.error}"
+        _emit("openshell_file_write", session=SESSION_NAME, path=result.path,
               bytes=len(content))
-        return f"wrote {path} ({body.strip()} bytes)"
+        return f"wrote {result.path} ({len(content.encode('utf-8'))} bytes)"
     except Exception as exc:  # noqa: BLE001
         return f"error: {type(exc).__name__}: {exc}"
 
 
 @tool
-def openshell_read_file(path: str, max_bytes: int = 8000) -> str:
-    """Read a text file from the sandbox.
+def openshell_read_file(path: str, limit: int = 2000, offset: int = 0) -> str:
+    """Read a text file from the sandbox, one page of lines at a time.
 
     Args:
-        path: Path inside the sandbox.
-        max_bytes: Truncate beyond this many bytes.
+        path: Absolute path, or one relative to the sandbox working directory.
+        limit: Maximum number of lines to return. Defaults to 2000.
+        offset: First line to return, 0-indexed. Defaults to the start.
     """
     try:
-        core, custom = _clients()
-        pod = _ensure_session(core, custom)
-        body, timed_out = _exec(
-            core, pod,
-            ["/bin/sh", "-c", f"head -c {int(max_bytes)} {shlex.quote(path)}"], 60)
-        if timed_out:
-            return f"error: timed out reading {path}"
+        result = get_sandbox().read(_abs(path), offset=int(offset), limit=int(limit))
+        if result.error:
+            return f"error: {result.error}"
+        body = (result.file_data or {}).get("content", "")
+        if result.next_offset is not None:
+            body += f"\n[more lines follow; read again with offset={result.next_offset}]"
         return _truncate(body) or "(empty)"
     except Exception as exc:  # noqa: BLE001
         return f"error: {type(exc).__name__}: {exc}"
@@ -354,13 +527,19 @@ def openshell_list_files(path: str = ".") -> str:
     """List files in the sandbox.
 
     Args:
-        path: Directory to list. Defaults to the working directory.
+        path: Directory to list. Defaults to the sandbox working directory.
     """
     try:
-        core, custom = _clients()
-        pod = _ensure_session(core, custom)
-        body, _ = _exec(core, pod, ["/bin/sh", "-c", f"ls -la {shlex.quote(path)}"], 30)
-        return _truncate(body) or "(empty)"
+        result = get_sandbox().ls(_abs(path))
+        if result.error:
+            return f"error: {result.error}"
+        # No size column: the base class's listing does not report one, and
+        # a column of zeros reads as a directory full of empty files.
+        lines = [
+            f"{'d' if f.get('is_dir') else '-'} {f.get('path')}"
+            for f in (result.entries or [])
+        ]
+        return _truncate("\n".join(lines)) or "(empty)"
     except Exception as exc:  # noqa: BLE001
         return f"error: {type(exc).__name__}: {exc}"
 
@@ -372,18 +551,8 @@ def openshell_reset_sandbox() -> str:
     Use when previous state is getting in the way, or to discard anything a
     prior snippet left behind.
     """
-    from kubernetes.client.rest import ApiException
     try:
-        _, custom = _clients()
-        with _session_lock:
-            try:
-                custom.delete_namespaced_custom_object(
-                    GROUP, VERSION, NAMESPACE, PLURAL, SESSION_NAME)
-            except ApiException as exc:
-                if exc.status != 404:
-                    raise
-        _emit("openshell_session_reset", session=SESSION_NAME)
-        return "sandbox destroyed; the next call will start a fresh one"
+        return get_sandbox().reset()
     except Exception as exc:  # noqa: BLE001
         return f"error: {type(exc).__name__}: {exc}"
 
