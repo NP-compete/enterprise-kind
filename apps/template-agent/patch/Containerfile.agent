@@ -7,7 +7,12 @@
 #      agent.yaml alone, which never produces one that can execute.
 #   3. a way to recreate that sandbox, which is not a filesystem
 #      operation and so has no tool in the filesystem middleware.
-FROM localhost/template-agent:local
+#
+# The base is upstream's published image rather than a local build of the
+# repo. No default: the tag has to stay in step with the ref the config
+# tree is cloned from, and `make agent-stack` passes both from one place.
+ARG AGENT_BASE_IMAGE
+FROM ${AGENT_BASE_IMAGE}
 
 COPY --chown=65532:root config/agent /app/config/agent
 COPY --chown=65532:root openshell_backend.py /app/deep_agent/src/agent/openshell_backend.py

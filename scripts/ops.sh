@@ -527,7 +527,13 @@ cmd_agent_stack() {
   #   agent-stack          both
   local sub="${1:-all}"
   local SRC="${BUILD_DIR}/template-src"
+  # The agent is not built from source: upstream publishes the image, and
+  # these two pins are the same release -- 75072ae IS tag dev-1.0.25. The
+  # clone is still needed because the published image ships an empty
+  # /app/config/agent, so the config tree has to come from the repo at the
+  # matching ref. Move them together or the config will not match the code.
   local AGENT_SHA=75072aeb0825553dd04af7c21a2e21d063797ae9
+  local AGENT_IMAGE=ghcr.io/redhat-data-and-ai/template-agent:dev-1.0.25
   local UI_SHA=7a037b5fec170573c77a81db48a3c81a57d6c2d0
   local NS=template-agent
 
@@ -563,13 +569,12 @@ cmd_agent_stack() {
       -f "${SRC}/template-ui/Containerfile" "${SRC}/template-ui" >/dev/null \
       || die "template-ui build failed"
 
-    step "building template-agent"
-    "${CE}" build -q -t localhost/template-agent:local \
-      -f "${SRC}/template-agent/Containerfile" "${SRC}/template-agent" >/dev/null \
-      || die "template-agent build failed"
+    step "pulling ${AGENT_IMAGE}"
+    "${CE}" pull -q "${AGENT_IMAGE}" >/dev/null \
+      || die "could not pull ${AGENT_IMAGE}"
 
-    # The agent image ships an empty /app/config/agent: the Containerfile sets
-    # CONFIG_PATH but never copies config in, so the agent exits with
+    # The agent image ships an empty /app/config/agent: its Containerfile
+    # sets CONFIG_PATH but never copies config in, so the agent exits with
     # "Missing required config files". The tree is nested, which ConfigMap
     # keys cannot express, so bake it as a layer.
     # The model is declared in PROMPT.md front matter, which is baked into
@@ -638,6 +643,7 @@ PROMPTEOF
     cp "${ROOT_DIR}/apps/template-agent/patch/openshell_backend.py" \
        "${SRC}/template-agent/openshell_backend.py"
     "${CE}" build -q -t localhost/template-agent:local-config \
+      --build-arg "AGENT_BASE_IMAGE=${AGENT_IMAGE}" \
       -f "${ROOT_DIR}/apps/template-agent/patch/Containerfile.agent" \
       "${SRC}/template-agent" >/dev/null \
       || die "agent config/tools layer build failed"
