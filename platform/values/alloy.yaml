@@ -1,6 +1,6 @@
 ---
 # Grafana Alloy is the single collector: it tails every pod's logs into Loki,
-# ships Kubernetes events, and terminates OTLP (metrics ->
+# ships Kubernetes events, and terminates OTLP (traces -> Tempo, metrics ->
 # Prometheus remote-write, logs -> Loki OTLP).
 controller:
   type: daemonset
@@ -202,12 +202,16 @@ alloy:
 
       otelcol.processor.batch "default" {
         output {
-          // No traces exporter: Tempo is not installed. Spans received on
-          // the OTLP endpoint are accepted and dropped here rather than
-          // queueing forever against an address that does not resolve.
-          traces  = []
+          traces  = [otelcol.exporter.otlp.tempo.input]
           metrics = [otelcol.exporter.prometheus.default.input]
           logs    = [otelcol.exporter.otlphttp.loki.input]
+        }
+      }
+
+      otelcol.exporter.otlp "tempo" {
+        client {
+          endpoint = "tempo.observability.svc.cluster.local:4317"
+          tls { insecure = true }
         }
       }
 

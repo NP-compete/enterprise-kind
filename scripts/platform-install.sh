@@ -355,8 +355,7 @@ ok "Vault + External Secrets ready (https://vault.${BASE_DOMAIN}${URL_SUFFIX})"
 # only talks to loki once both are running -- so they go up together.
 helm_install_nw kps observability prometheus-community/kube-prometheus-stack "${CHART_KUBE_PROM_STACK}" "$(render "${V}/kube-prometheus-stack.yaml")"
 helm_install_nw loki observability grafana/loki "${CHART_LOKI}" "$(render "${V}/loki.yaml")"
-# Tempo removed: tracing is the one observability pillar with no consumer
-# here beyond its own demo, and it carried a 10Gi PVC.
+helm_install_nw tempo observability grafana/tempo "${CHART_TEMPO}" "$(render "${V}/tempo.yaml")"
 helm_install_nw alloy observability grafana/alloy "${CHART_ALLOY}" "$(render "${V}/alloy.yaml")"
 
 kc apply -f "${M}/alert-sink.yaml" >/dev/null

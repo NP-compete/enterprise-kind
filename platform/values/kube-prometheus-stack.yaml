@@ -215,6 +215,33 @@ grafana:
       jsonData:
         timeout: 60
         maxLines: 1000
+        # Click a trace_id in a log line and jump straight to the trace.
+        derivedFields:
+          - name: TraceID
+            matcherRegex: '"trace_id":"(\w+)"'
+            url: '$${__value.raw}'
+            datasourceUid: tempo
+    - name: Tempo
+      type: tempo
+      uid: tempo
+      access: proxy
+      url: http://tempo.observability.svc.cluster.local:3200
+      jsonData:
+        tracesToLogsV2:
+          datasourceUid: loki
+          spanStartTimeShift: -5m
+          spanEndTimeShift: 5m
+          filterByTraceID: true
+          tags: [{ key: "service.name", value: "service_name" }]
+        tracesToMetrics:
+          datasourceUid: prometheus
+          tags: [{ key: "service.name", value: "service" }]
+        serviceMap:
+          datasourceUid: prometheus
+        nodeGraph:
+          enabled: true
+        lokiSearch:
+          datasourceUid: loki
 
 # --- control-plane scrape targets, wired for kind ---
 kubeApiServer:

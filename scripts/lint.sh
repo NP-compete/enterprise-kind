@@ -76,6 +76,7 @@ CHARTS=(
   "external-secrets|external-secrets|external-secrets/external-secrets|CHART_EXTERNAL_SECRETS|external-secrets.yaml"
   "kps|observability|prometheus-community/kube-prometheus-stack|CHART_KUBE_PROM_STACK|kube-prometheus-stack.yaml"
   "loki|observability|grafana/loki|CHART_LOKI|loki.yaml"
+  "tempo|observability|grafana/tempo|CHART_TEMPO|tempo.yaml"
   "alloy|observability|grafana/alloy|CHART_ALLOY|alloy.yaml"
   "velero|velero|vmware-tanzu/velero|CHART_VELERO|velero.yaml"
   "kyverno|kyverno|kyverno/kyverno|CHART_KYVERNO|kyverno.yaml"

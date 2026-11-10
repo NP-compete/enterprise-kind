@@ -344,3 +344,31 @@ patches:
           "ui.yaml": "server:\n  host: \"0.0.0.0\"\n  port: 8080\n  body_limit: 1048576\nlogging:\n  level: info\ncors:\n  origin: \"http://localhost:5173\"\nsecurity:\n  helmet:\n    enabled: true\n    csp:\n      default_src: [\"'self'\"]\n      script_src: [\"'self'\", \"'unsafe-inline'\"]\n      style_src: [\"'self'\", \"'unsafe-inline'\"]\n      img_src: [\"'self'\", \"data:\", \"blob:\"]\n      connect_src: [\"'self'\"]\n      font_src: [\"'self'\"]\n      object_src: [\"'none'\"]\n      frame_ancestors: [\"'none'\"]\n    cross_origin_embedder_policy: false\n  rate_limit:\n    enabled: true\n    max: 20000\n    window: \"1 minute\"\n    exclude_paths:\n      - \"/api/health\"\n      - \"/_health\"\n  session:\n    secure_cookie: false\n    max_age_days: 30\notel:\n  enabled: false\n  service_name: \"template-ui\"\nannouncement:\n  enabled: false\n  message: \"\"\n  type: info\n"
         }
       }
+
+  # --- observability --------------------------------------------------------
+  # The agent emits OTLP but nothing told it where to send it, so traces and
+  # metrics went nowhere while only its stdout reached Loki. Alloy already
+  # terminates OTLP on 4317 and fans out: traces to Tempo, metrics to
+  # Prometheus, logs to Loki. Pointing the agent at Alloy puts it in the same
+  # pipeline as every other component rather than leaving it a blind spot.
+  - target: { kind: Deployment, name: agent }
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: { name: agent }
+      spec:
+        template:
+          spec:
+            containers:
+              - name: agent
+                env:
+                  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                    value: http://alloy.observability.svc.cluster.local:4317
+                  - name: OTEL_EXPORTER_OTLP_INSECURE
+                    value: "true"
+                  - name: OTEL_SERVICE_NAME
+                    value: template-agent
+                  - name: OTEL_METRICS
+                    value: "true"
+                  - name: OTEL_METRIC_EXPORT_INTERVAL
+                    value: "30000"
