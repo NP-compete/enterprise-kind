@@ -237,6 +237,22 @@ else
   warn "collision check skipped -- needs a full run (charts + manifests)"
 fi
 
+# ---------------------------------------------------------- gitops manifests
+# Everything under apps/ is read straight from git by Argo CD, which does
+# not run envsubst. A ${VAR} that survives into a manifest becomes a literal
+# -- "podinfo.${BASE_DOMAIN}" as a hostname, which the API server rejects.
+if section manifests || [[ "${ONLY}" == "all" ]]; then
+  log "checking apps/ for envsubst placeholders Argo CD cannot expand"
+  stray="$(grep -rn '\${[A-Z_]\+}' "${ROOT_DIR}"/apps --include='*.yaml' 2>/dev/null \
+           | grep -v 'upstream\.yaml' | grep -vE ':\s*#' || true)"
+  if [[ -z "${stray}" ]]; then
+    ok "no unexpandable placeholders under apps/"
+  else
+    fail "apps/ contains envsubst placeholders; Argo CD will apply them literally:"
+    printf '%s\n' "${stray}" | sed 's/^/      /' >&2
+  fi
+fi
+
 # ---------------------------------------------------------------- shell
 if section shell; then
   log "shellcheck"
