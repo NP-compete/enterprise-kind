@@ -1,30 +1,31 @@
-"""Built-in agent tools that run inside the agent process.
+"""An OpenShell sandbox wired in as the agent's deepagents backend.
 
-Upstream template-agent gets every tool over MCP. This module adds tools
-that live in the agent itself, assembled alongside the MCP ones in
-deep_agent/aegra/graph.py.
+Upstream template-agent gets every tool over MCP and keeps its files in
+checkpointed graph state. This module gives it somewhere real to run
+code: a long-lived OpenShell Sandbox (agents.x-k8s.io) that becomes the
+default backend of the agent's `CompositeBackend`.
 
-The sandbox itself is a `deepagents.backends.sandbox.BaseSandbox`
-subclass, after langchain-ai/openshell-deepagent's backend.py. That base
-class already implements read, write, edit, delete, ls, grep and glob --
-all of them on top of a single primitive, `execute()` -- so the only
-things that are ours are the three abstract members: `execute()`,
-`upload_files()` and `download_files()`. Everything the tools below do
-with files goes through the inherited implementations rather than a
-hand-written `head -c` or `ls -la`, which is where pagination, encoding
-detection, binary handling and the standard error codes come from.
+Nothing here defines a tool. `FilesystemMiddleware` already derives
+`execute`, `read_file`, `write_file`, `edit_file`, `ls`, `glob` and
+`grep` from whatever backend it is given, and `BaseSandbox` already
+implements every one of those file operations on top of a single
+primitive. So the only code that is ours is the part no library can
+have: the three abstract members that drive a pod -- `execute()`,
+`upload_files()` and `download_files()` -- plus the session lifecycle.
 
-Execution lands in a long-lived OpenShell Sandbox (agents.x-k8s.io): one
-session reused across calls, so state persists until it is reset. The pod
-mounts no service account token, runs non-root with all capabilities
-dropped, and is covered by a default-deny egress NetworkPolicy (DNS only)
-shipped alongside this tool.
+Making the sandbox the composite's *default* is what turns on the
+`execute` tool: the middleware checks `backend.default` for
+`SandboxBackendProtocol`. It also means the agent's own container
+filesystem is no longer reachable through any file tool -- every path
+that does not match a route lands in the sandbox instead.
 
-That policy is ours: OpenShell's own only selects the pods its gateway
-manages and only restricts Ingress, so without it these sandboxes had
-full outbound network access. It is enforced because Calico is the CNI --
-Kubernetes accepts NetworkPolicy objects whether or not anything
-implements them.
+The sandbox pod mounts no service account token, runs non-root with all
+capabilities dropped, and is covered by a default-deny egress
+NetworkPolicy (DNS only) shipped alongside this module. That policy is
+ours: OpenShell's own only selects the pods its gateway manages and only
+restricts Ingress, so without it these sandboxes had full outbound
+network access. It is enforced because Calico is the CNI -- Kubernetes
+accepts NetworkPolicy objects whether or not anything implements them.
 """
 
 from __future__ import annotations
@@ -38,7 +39,9 @@ import threading
 import time
 import uuid
 
+from deepagents.backends.composite import CompositeBackend
 from deepagents.backends.protocol import (
+    BackendProtocol,
     ExecuteResponse,
     FileDownloadResponse,
     FileUploadResponse,
@@ -47,12 +50,12 @@ from deepagents.backends.sandbox import BaseSandbox
 from langchain_core.tools import tool
 
 
-# Per-run records on the agent's own stdout, which Alloy ships to Loki.
+# Per-command records on the agent's own stdout, which Alloy ships to Loki.
 #
-# The sandbox pod cannot provide these: its container runs `sleep` and the
-# snippet is delivered over exec, whose output never reaches pod stdout.
+# The sandbox pod cannot provide these: its container runs `sleep` and
+# commands are delivered over exec, whose output never reaches pod stdout.
 # Querying Loki for the sandbox container returns nothing at all. If a run
-# is to be visible afterwards, the tool has to say so itself.
+# is to be visible afterwards, this side has to say so itself.
 def _emit(event: str, **fields) -> None:
     """One JSON line per run event, keyed by run_id so runs stay separable.
 
@@ -75,7 +78,7 @@ MAX_OUTPUT = int(os.environ.get("SANDBOX_MAX_OUTPUT", "16000"))
 SANDBOX_HOSTNAME = os.environ.get("SANDBOX_HOSTNAME", "openshell-sandbox")
 # A fixed sandbox reused across calls, after langchain-ai/openshell-deepagent:
 # one long-lived session rather than a pod per invocation. Creating a pod cost
-# ~2s on every call and threw away anything the previous snippet installed or
+# ~2s on every call and threw away anything the previous command installed or
 # wrote. Set SANDBOX_NAME to pin a specific one.
 SESSION_NAME = os.environ.get("SANDBOX_NAME", "openshell-session")
 SESSION_IDLE_TTL = int(os.environ.get("SANDBOX_IDLE_TTL", "3600"))
@@ -84,11 +87,15 @@ SESSION_IDLE_TTL = int(os.environ.get("SANDBOX_IDLE_TTL", "3600"))
 # somewhere the sandbox user owns.
 WORKDIR = os.environ.get("SANDBOX_WORKDIR", "/tmp/session")
 DEFAULT_TIMEOUT = int(os.environ.get("SANDBOX_EXEC_TIMEOUT", "120"))
+# Where the middleware offloads large tool results and evicted messages.
+# It defaults to "/", which under this topology is the sandbox -- so a
+# reset would throw away conversation history the model still needs to
+# rehydrate. Routed back to the agent's own (checkpointed) backend.
+ARTIFACTS_ROOT = "/artifacts/"
 
 _session_lock = threading.Lock()
 
 GROUP, VERSION, PLURAL = "agents.x-k8s.io", "v1beta1", "sandboxes"
-INTERPRETERS = {"python", "bash", "sh"}
 # One exec carries at most this much base64 in its argv. Linux caps a whole
 # argv at ~2 MiB; staying well under it means a large upload is split across
 # several appends rather than failing with E2BIG.
@@ -99,8 +106,8 @@ def _clients():
     """Import and configure the Kubernetes client lazily.
 
     Deferred so that importing this module never fails outside a cluster --
-    the agent must still start (and report a useful error from the tool)
-    when it has no Kubernetes credentials.
+    the agent must still start (and report a useful error) when it has no
+    Kubernetes credentials.
     """
     from kubernetes import client, config
 
@@ -133,7 +140,7 @@ def _manifest(name: str) -> dict:
                     }
                 },
                 "spec": {
-                    # The snippet has no business talking to the API server.
+                    # The sandbox has no business talking to the API server.
                     "automountServiceAccountToken": False,
                     "restartPolicy": "Never",
                     # Without this the hostname is the generated pod name
@@ -193,8 +200,8 @@ class OpenShellSandbox(BaseSandbox):
 
     `BaseSandbox` supplies every file operation on top of `execute()`, so
     only the three abstract members are implemented here. Commands run in
-    `WORKDIR` inside a long-lived session pod that is created on first use
-    and reused until `reset()`.
+    `WORKDIR` inside a session pod created on first use and reused until
+    `reset()`.
     """
 
     # The capture wrapper assumes a shell and coreutils the base class does
@@ -212,8 +219,8 @@ class OpenShellSandbox(BaseSandbox):
     def _session(self) -> tuple:
         """Return (CoreV1Api, pod name) for the shared sandbox.
 
-        Serialised: two concurrent tool calls would otherwise both decide
-        the sandbox is missing and race to create it, and the loser gets a
+        Serialised: two concurrent calls would otherwise both decide the
+        sandbox is missing and race to create it, and the loser gets a
         409 AlreadyExists that surfaces to the model as a tool failure.
         """
         from kubernetes.client.rest import ApiException
@@ -255,7 +262,7 @@ class OpenShellSandbox(BaseSandbox):
         return core, pod
 
     def reset(self) -> str:
-        """Delete the session pod; the next call creates a fresh one."""
+        """Delete the session pod; the next command creates a fresh one."""
         from kubernetes.client.rest import ApiException
 
         _, custom = _clients()
@@ -267,7 +274,7 @@ class OpenShellSandbox(BaseSandbox):
                 if exc.status != 404:
                     raise
         _emit("openshell_session_reset", session=SESSION_NAME)
-        return "sandbox destroyed; the next call will start a fresh one"
+        return "sandbox destroyed; the next command will start a fresh one"
 
     # -- the exec primitive --------------------------------------------
 
@@ -327,6 +334,10 @@ class OpenShellSandbox(BaseSandbox):
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         """Run a shell command in the sandbox's working directory.
 
+        Every sandbox command passes through here, including the ones the
+        base class generates for `read_file`, `grep` and the rest, so this
+        is the one place a run can be recorded.
+
         Args:
             command: Full shell command string.
             timeout: Seconds to allow. Defaults to SANDBOX_EXEC_TIMEOUT.
@@ -335,9 +346,21 @@ class OpenShellSandbox(BaseSandbox):
             `ExecuteResponse` with combined stdout and stderr.
         """
         timeout_s = max(1, min(int(timeout or DEFAULT_TIMEOUT), 600))
-        core, pod = self._session()
-        argv = ["/bin/sh", "-c", f"cd {shlex.quote(WORKDIR)} 2>/dev/null || cd /tmp\n{command}"]
-        out, err, code = self._raw(core, pod, argv, timeout_s)
+        run_id = uuid.uuid4().hex[:8]
+        started = time.time()
+        _emit("openshell_run_started", run_id=run_id, session=SESSION_NAME,
+              timeout_s=timeout_s, command_bytes=len(command),
+              command_preview=command[:400])
+        try:
+            core, pod = self._session()
+            argv = ["/bin/sh", "-c",
+                    f"cd {shlex.quote(WORKDIR)} 2>/dev/null || cd /tmp\n{command}"]
+            out, err, code = self._raw(core, pod, argv, timeout_s)
+        except Exception as exc:
+            _emit("openshell_run_finished", run_id=run_id, session=SESSION_NAME,
+                  status="error", duration_s=round(time.time() - started, 3),
+                  error=f"{type(exc).__name__}: {exc}")
+            raise
         # stdout first and stderr only when it is non-empty: the base class
         # parses the stdout of its own helper scripts as JSON, and anything
         # prepended or interleaved would make a successful read look like a
@@ -346,6 +369,10 @@ class OpenShellSandbox(BaseSandbox):
         truncated = len(body) > MAX_OUTPUT
         if truncated:
             body = f"{body[:MAX_OUTPUT]}\n...[truncated, {len(body) - MAX_OUTPUT} more bytes]"
+        _emit("openshell_run_finished", run_id=run_id, session=SESSION_NAME,
+              status="ok" if code == 0 else "error", exit_code=code,
+              duration_s=round(time.time() - started, 3),
+              output_preview=body[:800])
         return ExecuteResponse(output=body, exit_code=code, truncated=truncated)
 
     # -- file transfer -------------------------------------------------
@@ -428,128 +455,37 @@ def get_sandbox() -> OpenShellSandbox:
     return _sandbox
 
 
-def _truncate(text: str) -> str:
-    if len(text) <= MAX_OUTPUT:
-        return text
-    return f"{text[:MAX_OUTPUT]}\n...[truncated, {len(text) - MAX_OUTPUT} more bytes]"
+def wrap_backend(backend: BackendProtocol) -> BackendProtocol:
+    """Put the sandbox underneath the agent's configured routes.
 
+    The agent's own `get_configured_backend()` builds a `CompositeBackend`
+    from agent.yaml: /skills/ and /data/ read-only, /memories/ and
+    /reports/ in the LangGraph store, everything else in checkpointed
+    state. Only that last part changes here -- the sandbox takes over as
+    the default, which is both where loose paths go and what the
+    middleware inspects to decide whether to offer the `execute` tool.
 
-@tool
-def openshell_run_code(code: str, language: str = "python", timeout_s: int = 60) -> str:
-    """Run code in the OpenShell sandbox and return its output.
-
-    The sandbox is a long-lived session shared across calls, so state DOES
-    persist: files you write, packages you install and variables saved to
-    disk are still there next time. Use openshell_reset_sandbox for a clean
-    slate.
-
-    It runs as a non-root user with no Kubernetes credentials and no network
-    access beyond DNS.
-
-    Args:
-        code: Source to execute.
-        language: One of "python", "bash", "sh". Defaults to "python".
-        timeout_s: Seconds to allow, 1-300. Defaults to 60.
-
-    Returns:
-        Combined stdout and stderr.
+    The displaced backend is kept, routed at `ARTIFACTS_ROOT`, so the
+    middleware's offloaded tool results and evicted messages stay in
+    checkpointed state rather than in a pod that `reset()` can delete.
     """
-    lang = (language or "python").lower().strip()
-    if lang not in INTERPRETERS:
-        return f"error: unsupported language {language!r}; use one of {sorted(INTERPRETERS)}"
-    if not (code or "").strip():
-        return "error: no code supplied"
-    timeout_s = max(1, min(int(timeout_s or 60), 300))
-
-    run_id = uuid.uuid4().hex[:8]
-    started = time.time()
-    _emit("openshell_run_started", run_id=run_id, session=SESSION_NAME,
-          language=lang, timeout_s=timeout_s, code_bytes=len(code),
-          code_preview=code[:400])
-    try:
-        command = f"python3 -c {shlex.quote(code)}" if lang == "python" else code
-        result = get_sandbox().execute(command, timeout=timeout_s)
-        _emit("openshell_run_finished", run_id=run_id, session=SESSION_NAME,
-              language=lang, status="ok" if result.exit_code == 0 else "error",
-              exit_code=result.exit_code,
-              duration_s=round(time.time() - started, 3),
-              output_preview=result.output[:800])
-        return result.output or "(no output)"
-    except Exception as exc:  # noqa: BLE001 - returned to the model, not swallowed
-        _emit("openshell_run_finished", run_id=run_id, session=SESSION_NAME,
-              status="error", duration_s=round(time.time() - started, 3),
-              error=f"{type(exc).__name__}: {exc}")
-        return f"error: {type(exc).__name__}: {exc}"
-
-
-@tool
-def openshell_write_file(path: str, content: str) -> str:
-    """Write a text file inside the sandbox, creating parent directories.
-
-    Args:
-        path: Absolute path, or one relative to the sandbox working directory.
-        content: File contents.
-    """
-    try:
-        result = get_sandbox().write(_abs(path), content)
-        if result.error:
-            return f"error: {result.error}"
-        _emit("openshell_file_write", session=SESSION_NAME, path=result.path,
-              bytes=len(content))
-        return f"wrote {result.path} ({len(content.encode('utf-8'))} bytes)"
-    except Exception as exc:  # noqa: BLE001
-        return f"error: {type(exc).__name__}: {exc}"
-
-
-@tool
-def openshell_read_file(path: str, limit: int = 2000, offset: int = 0) -> str:
-    """Read a text file from the sandbox, one page of lines at a time.
-
-    Args:
-        path: Absolute path, or one relative to the sandbox working directory.
-        limit: Maximum number of lines to return. Defaults to 2000.
-        offset: First line to return, 0-indexed. Defaults to the start.
-    """
-    try:
-        result = get_sandbox().read(_abs(path), offset=int(offset), limit=int(limit))
-        if result.error:
-            return f"error: {result.error}"
-        body = (result.file_data or {}).get("content", "")
-        if result.next_offset is not None:
-            body += f"\n[more lines follow; read again with offset={result.next_offset}]"
-        return _truncate(body) or "(empty)"
-    except Exception as exc:  # noqa: BLE001
-        return f"error: {type(exc).__name__}: {exc}"
-
-
-@tool
-def openshell_list_files(path: str = ".") -> str:
-    """List files in the sandbox.
-
-    Args:
-        path: Directory to list. Defaults to the sandbox working directory.
-    """
-    try:
-        result = get_sandbox().ls(_abs(path))
-        if result.error:
-            return f"error: {result.error}"
-        # No size column: the base class's listing does not report one, and
-        # a column of zeros reads as a directory full of empty files.
-        lines = [
-            f"{'d' if f.get('is_dir') else '-'} {f.get('path')}"
-            for f in (result.entries or [])
-        ]
-        return _truncate("\n".join(lines)) or "(empty)"
-    except Exception as exc:  # noqa: BLE001
-        return f"error: {type(exc).__name__}: {exc}"
+    sandbox = get_sandbox()
+    if isinstance(backend, CompositeBackend):
+        routes = dict(backend.routes)
+        displaced = backend.default
+    else:
+        routes, displaced = {}, backend
+    routes.setdefault(ARTIFACTS_ROOT, displaced)
+    return CompositeBackend(default=sandbox, routes=routes, artifacts_root=ARTIFACTS_ROOT)
 
 
 @tool
 def openshell_reset_sandbox() -> str:
-    """Destroy the sandbox so the next call starts from a clean one.
+    """Destroy the sandbox so the next command starts from a clean one.
 
-    Use when previous state is getting in the way, or to discard anything a
-    prior snippet left behind.
+    Use when previous state is getting in the way, or to discard anything
+    an earlier command left behind. Files, installed packages and the
+    working directory all go.
     """
     try:
         return get_sandbox().reset()
@@ -558,7 +494,11 @@ def openshell_reset_sandbox() -> str:
 
 
 def get_builtin_tools() -> list:
-    """Tools assembled into the agent alongside the MCP ones."""
-    return [openshell_run_code, openshell_write_file,
-            openshell_read_file, openshell_list_files,
-            openshell_reset_sandbox]
+    """The one tool the filesystem middleware does not already provide.
+
+    Everything else the model needs -- execute, read_file, write_file,
+    edit_file, ls, glob, grep -- `FilesystemMiddleware` derives from the
+    backend itself. Recreating the pod is not a filesystem operation, so
+    it has no equivalent there.
+    """
+    return [openshell_reset_sandbox]

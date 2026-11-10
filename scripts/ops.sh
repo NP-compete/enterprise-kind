@@ -582,51 +582,61 @@ cmd_agent_stack() {
     grep -q "^model: ${AGENT_MODEL}$" "${SRC}/template-agent/config/agent/PROMPT.md" \
       || die "could not set the model in PROMPT.md"
 
-    step "baking the agent config and built-in tools"
-    # Declare the tool in PROMPT.md so the capability manifest admits it:
-    # an unlisted tool is assembled into the graph and then filtered back
-    # out by enforce_capability, which looks like the tool silently not
-    # existing.
-    if ! grep -q 'openshell_run_code' "${SRC}/template-agent/config/agent/PROMPT.md"; then
-      sed -i.bak -E 's|^tools:$|tools:\n  - openshell_run_code\n  - openshell_write_file\n  - openshell_read_file\n  - openshell_list_files\n  - openshell_reset_sandbox|' \
-        "${SRC}/template-agent/config/agent/PROMPT.md"
-      rm -f "${SRC}/template-agent/config/agent/PROMPT.md.bak"
-      grep -q 'openshell_run_code' "${SRC}/template-agent/config/agent/PROMPT.md" \
-        || die "could not add openshell_run_code to the PROMPT.md tools list"
-    fi
+    step "baking the agent config and the OpenShell backend"
+    # Declare the tools in PROMPT.md so the capability manifest admits
+    # them: an unlisted tool is assembled into the graph and then filtered
+    # back out by enforce_capability, which looks like the tool silently
+    # not existing. All but the last are derived by FilesystemMiddleware
+    # from the backend rather than written by us.
+    #
+    # Rewritten rather than appended-if-missing. A guard that skips when
+    # the section is already there leaves an earlier build's wording in
+    # place: that is how a prompt still telling the model "each call gets
+    # a fresh sandbox" survived the move to a persistent session.
+    local PROMPT_MD="${SRC}/template-agent/config/agent/PROMPT.md"
+    sed -i.bak -E \
+      '/^  - (execute|read_file|write_file|edit_file|ls|glob|grep|delete|openshell_[a-z_]+)$/d' \
+      "${PROMPT_MD}"
+    sed -i.bak -E 's|^tools:$|tools:\n  - execute\n  - read_file\n  - write_file\n  - edit_file\n  - ls\n  - glob\n  - grep\n  - delete\n  - openshell_reset_sandbox|' \
+      "${PROMPT_MD}"
+    rm -f "${PROMPT_MD}.bak"
+    grep -q '^  - openshell_reset_sandbox$' "${PROMPT_MD}" \
+      || die "could not add the sandbox tools to the PROMPT.md tools list"
     # The stock persona is a fitness assistant whose routing sends anything
-    # non-health to "Out-of-scope -> Decline". The tool is wired and the
-    # capability manifest admits it, but the model still refuses -- so the
-    # prompt has to say code execution is in scope, or the tool is dead
-    # weight in the UI.
-    if ! grep -q 'Running code' "${SRC}/template-agent/config/agent/PROMPT.md"; then
-      cat >> "${SRC}/template-agent/config/agent/PROMPT.md" <<'PROMPTEOF'
+    # non-health to "Out-of-scope -> Decline". The tools are wired and the
+    # capability manifest admits them, but the model still refuses -- so
+    # the prompt has to say code execution is in scope, or they are dead
+    # weight in the UI. Our section is always last, so dropping everything
+    # from its heading onwards leaves the upstream prompt intact.
+    awk 'index($0, "## Running code (in scope)") == 1 { exit } { print }' \
+      "${PROMPT_MD}" > "${PROMPT_MD}.new" && mv "${PROMPT_MD}.new" "${PROMPT_MD}"
+    cat >> "${PROMPT_MD}" <<'PROMPTEOF'
 
 ## Running code (in scope)
 
-You can execute code in a disposable, network-isolated sandbox using the
-`openshell_run_code` tool. This is IN SCOPE -- do not decline it as
-out-of-scope.
+You can run shell commands in a network-isolated sandbox with the
+`execute` tool. This is IN SCOPE -- do not decline it as out-of-scope.
 
 Use it when the user asks you to run code, compute something
 programmatically, check a value, or inspect the sandbox environment.
 
-- Call `openshell_run_code` with `code` and `language` ("python", "bash").
+- `execute` takes a shell command: `python3 -c '...'` to run Python, or
+  any ordinary command.
 - Report the tool's output verbatim. Do not invent output you did not get.
+- `read_file`, `write_file`, `edit_file`, `ls`, `glob` and `grep` act on
+  that same sandbox for any path outside /memories/, /reports/, /skills/
+  and /data/.
 - The sandbox is a long-lived session shared across calls, so state DOES
   persist: files, installed packages and anything written to disk are
   still there next time. Call `openshell_reset_sandbox` for a clean slate.
 - It has no network access beyond DNS and no cluster credentials.
-- You can also write, read and list files with `openshell_write_file`,
-  `openshell_read_file` and `openshell_list_files`.
-- If the tool returns an error, show it rather than guessing at a cause.
+- If a tool returns an error, show it rather than guessing at a cause.
 PROMPTEOF
-      grep -q 'Running code' "${SRC}/template-agent/config/agent/PROMPT.md" \
-        || die "could not add the code-execution section to PROMPT.md"
-    fi
+    grep -q '## Running code (in scope)' "${PROMPT_MD}" \
+      || die "could not add the code-execution section to PROMPT.md"
 
-    cp "${ROOT_DIR}/apps/template-agent/patch/builtin_tools.py" \
-       "${SRC}/template-agent/builtin_tools.py"
+    cp "${ROOT_DIR}/apps/template-agent/patch/openshell_backend.py" \
+       "${SRC}/template-agent/openshell_backend.py"
     "${CE}" build -q -t localhost/template-agent:local-config \
       -f "${ROOT_DIR}/apps/template-agent/patch/Containerfile.agent" \
       "${SRC}/template-agent" >/dev/null \

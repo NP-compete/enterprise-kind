@@ -1,15 +1,16 @@
-# Agent image with our config and built-in tools baked in.
+# Agent image with our config and the OpenShell backend baked in.
 #
-# Two things upstream's image does not have:
+# Three things upstream's image does not have:
 #   1. /app/config/agent -- the Containerfile sets CONFIG_PATH but never
 #      copies config in, so the agent exits on "Missing required config".
-#   2. a local tool registry -- every tool arrives over MCP. The sed below
-#      is the one-line fork point that appends our built-in tools to the
-#      list the graph assembles.
+#   2. a sandbox to run code in. The graph builds its backend from
+#      agent.yaml alone, which never produces one that can execute.
+#   3. a way to recreate that sandbox, which is not a filesystem
+#      operation and so has no tool in the filesystem middleware.
 FROM localhost/template-agent:local
 
 COPY --chown=65532:root config/agent /app/config/agent
-COPY --chown=65532:root builtin_tools.py /app/deep_agent/src/agent/builtin_tools.py
+COPY --chown=65532:root openshell_backend.py /app/deep_agent/src/agent/openshell_backend.py
 
 USER 0
 # The kubernetes client is not in upstream's dependency set. The venv is
@@ -18,11 +19,21 @@ USER 0
 RUN uv pip install --python /app/.venv/bin/python3 --no-cache 'kubernetes>=31.0.0' \
  && /app/.venv/bin/python3 -c 'import kubernetes'
 
-# Append built-in tools where the graph collects the MCP ones. Asserted
-# rather than assumed: if upstream renames that line the build fails here
-# instead of silently shipping an agent with no code-execution tool.
+# Two fork points, both asserted rather than assumed: if upstream renames
+# either line the build fails here instead of silently shipping an agent
+# that cannot run code.
+#
+# The first puts the sandbox under the configured routes as the backend's
+# default, which is what makes FilesystemMiddleware offer `execute` and
+# point read_file/write_file/edit_file/ls/glob/grep at the pod.
+RUN grep -q '^    backend = get_configured_backend()$' /app/deep_agent/aegra/graph.py \
+ && sed -i 's|^    backend = get_configured_backend()$|    from deep_agent.src.agent.openshell_backend import wrap_backend\n    backend = wrap_backend(get_configured_backend())|' \
+      /app/deep_agent/aegra/graph.py \
+ && grep -q 'wrap_backend(get_configured_backend())' /app/deep_agent/aegra/graph.py
+
+# The second adds the one tool the middleware does not derive.
 RUN grep -q '^    all_available_tools = list(mcp_tools)$' /app/deep_agent/aegra/graph.py \
- && sed -i 's|^    all_available_tools = list(mcp_tools)$|    from deep_agent.src.agent.builtin_tools import get_builtin_tools\n    all_available_tools = list(mcp_tools) + get_builtin_tools()|' \
+ && sed -i 's|^    all_available_tools = list(mcp_tools)$|    from deep_agent.src.agent.openshell_backend import get_builtin_tools\n    all_available_tools = list(mcp_tools) + get_builtin_tools()|' \
       /app/deep_agent/aegra/graph.py \
  && grep -q 'get_builtin_tools()' /app/deep_agent/aegra/graph.py
 

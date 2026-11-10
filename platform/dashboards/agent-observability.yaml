@@ -513,7 +513,7 @@ data:
           "id": 11,
           "type": "table",
           "title": "OpenShell runs",
-          "description": "One row per completed sandbox run. The sandbox pod cannot provide these: its container runs sleep and the snippet is delivered over exec, whose output never reaches pod stdout. The tool emits them itself.",
+          "description": "One row per completed sandbox command, including the ones the filesystem tools issue on the agent's behalf. The sandbox pod cannot provide these: its container runs sleep and commands are delivered over exec, whose output never reaches pod stdout. The backend emits them itself.",
           "datasource": {
             "type": "loki",
             "uid": "loki"
@@ -604,7 +604,7 @@ data:
                 "includeByName": {
                   "Time": true,
                   "run_id": true,
-                  "language": true,
+                  "exit_code": true,
                   "status": true,
                   "duration_s": true,
                   "output_preview": true,
@@ -613,7 +613,7 @@ data:
                 "indexByName": {
                   "Time": 0,
                   "run_id": 1,
-                  "language": 2,
+                  "exit_code": 2,
                   "status": 3,
                   "duration_s": 4,
                   "output_preview": 5,

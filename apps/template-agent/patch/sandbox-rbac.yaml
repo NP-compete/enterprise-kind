@@ -1,7 +1,8 @@
 ---
-# The agent creates and execs into Sandboxes for its openshell_run_code
-# tool. Namespaced to template-agent, where the sandboxes now run: no
-# secrets, no other namespaces, nothing beyond what the tool needs.
+# The agent creates and execs into Sandboxes for the OpenShell backend
+# behind its execute and file tools. Namespaced to template-agent, where
+# the sandboxes now run: no secrets, no other namespaces, nothing beyond
+# what the backend needs.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
