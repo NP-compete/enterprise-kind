@@ -20,11 +20,33 @@ implements them.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 import uuid
 
 from langchain_core.tools import tool
+
+# Per-run records on the agent's own stdout, which Alloy ships to Loki.
+#
+# The sandbox pod cannot provide these: its container runs `sleep` and the
+# snippet is delivered over exec, whose output never reaches pod stdout --
+# and the pod is deleted seconds later anyway. Querying Loki for the
+# sandbox container returns nothing at all. If a run is to be visible
+# afterwards, the tool has to say so itself.
+def _emit(event: str, **fields) -> None:
+    """One JSON line per run event, keyed by run_id so runs stay separable.
+
+    Written straight to stdout rather than through `logging`: the agent
+    configures the root logger at WARNING with no handlers attached, so a
+    logger.info() here is silently discarded and never reaches Loki. The
+    agent's own records are JSON on stdout too, so the shape matches.
+    """
+    try:
+        print(json.dumps({"event": event, "logger": "openshell.run",
+                          "level": "info", **fields}), flush=True)
+    except Exception:  # noqa: BLE001 - logging must never break a run
+        pass
 
 NAMESPACE = os.environ.get("SANDBOX_NAMESPACE", "template-agent")
 IMAGE = os.environ.get("SANDBOX_IMAGE", "docker.io/library/python:3.12-slim")
@@ -172,6 +194,10 @@ def openshell_run_code(code: str, language: str = "python", timeout_s: int = 60)
         return f"error: no Kubernetes access from the agent ({type(exc).__name__}: {exc})"
 
     name = f"agent-code-{uuid.uuid4().hex[:8]}"
+    started = time.time()
+    _emit("openshell_run_started", run_id=name, language=lang,
+          timeout_s=timeout_s, code_bytes=len(code),
+          code_preview=code[:400])
     created = False
     try:
         custom.create_namespaced_custom_object(GROUP, VERSION, NAMESPACE, PLURAL, _manifest(name))
@@ -212,11 +238,22 @@ def openshell_run_code(code: str, language: str = "python", timeout_s: int = 60)
             body += "\n--- stderr ---\n" + "".join(err)
         if timed_out:
             body += f"\n[timed out after {timeout_s}s]"
+        _emit("openshell_run_finished", run_id=name, language=lang,
+              status="timeout" if timed_out else "ok",
+              duration_s=round(time.time() - started, 3),
+              stdout_bytes=len("".join(out)), stderr_bytes=len("".join(err)),
+              output_preview=_truncate(body)[:800])
         return _truncate(body) or "(no output)"
 
     except ApiException as exc:
+        _emit("openshell_run_finished", run_id=name, language=lang,
+              status="error", duration_s=round(time.time() - started, 3),
+              error=f"kubernetes API {exc.status} {exc.reason}")
         return f"error: kubernetes API {exc.status} {exc.reason}"
     except Exception as exc:  # noqa: BLE001 - returned to the model, not swallowed
+        _emit("openshell_run_finished", run_id=name, language=lang,
+              status="error", duration_s=round(time.time() - started, 3),
+              error=f"{type(exc).__name__}: {exc}")
         return f"error: {type(exc).__name__}: {exc}"
     finally:
         if created:

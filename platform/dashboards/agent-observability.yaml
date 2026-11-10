@@ -508,10 +508,183 @@ data:
               "expr": "{namespace=\"template-agent\", container=~\"agent|ui\"}"
             }
           ]
+        },
+        {
+          "id": 11,
+          "type": "table",
+          "title": "OpenShell runs",
+          "description": "One row per completed sandbox run. The sandbox pod cannot provide these: its container runs sleep and the snippet is delivered over exec, whose output never reaches pod stdout. The tool emits them itself.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 27
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "left",
+                "filterable": true
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "duration_s"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  },
+                  {
+                    "id": "custom.width",
+                    "value": 110
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "run_id"
+                },
+                "properties": [
+                  {
+                    "id": "custom.width",
+                    "value": 210
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "status"
+                },
+                "properties": [
+                  {
+                    "id": "custom.width",
+                    "value": 90
+                  }
+                ]
+              }
+            ]
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "queryType": "range",
+              "expr": "{namespace=\"template-agent\", container=\"agent\"} |= \"openshell_run_finished\" | json",
+              "maxLines": 200
+            }
+          ],
+          "transformations": [
+            {
+              "id": "extractFields",
+              "options": {
+                "source": "Line",
+                "format": "json"
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "includeByName": {
+                  "Time": true,
+                  "run_id": true,
+                  "language": true,
+                  "status": true,
+                  "duration_s": true,
+                  "output_preview": true,
+                  "error": true
+                },
+                "indexByName": {
+                  "Time": 0,
+                  "run_id": 1,
+                  "language": 2,
+                  "status": 3,
+                  "duration_s": 4,
+                  "output_preview": 5,
+                  "error": 6
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "type": "logs",
+          "title": "OpenShell run log (filter by run id)",
+          "description": "Both events for each run. Set the run_id variable to isolate one.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 36
+          },
+          "options": {
+            "showTime": true,
+            "wrapLogMessage": true,
+            "sortOrder": "Descending",
+            "enableLogDetails": true,
+            "prettifyLogMessage": true
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "{namespace=\"template-agent\", container=\"agent\"} |= \"openshell_run\" | json | run_id =~ \"$run_id\""
+            }
+          ]
         }
       ],
       "templating": {
-        "list": []
+        "list": [
+          {
+            "name": "run_id",
+            "label": "Run",
+            "type": "query",
+            "datasource": {
+              "type": "loki",
+              "uid": "loki"
+            },
+            "query": {
+              "label": "",
+              "stream": "{namespace=\"template-agent\", container=\"agent\"} |= \"openshell_run_finished\" | json",
+              "type": 1,
+              "refId": "run_id"
+            },
+            "definition": "run_id",
+            "includeAll": true,
+            "allValue": ".*",
+            "multi": false,
+            "current": {
+              "text": "All",
+              "value": "$__all"
+            },
+            "refresh": 2,
+            "sort": 1
+          }
+        ]
       },
       "links": [
         {
