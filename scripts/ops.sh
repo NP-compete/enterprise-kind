@@ -582,12 +582,24 @@ cmd_agent_stack() {
     grep -q "^model: ${AGENT_MODEL}$" "${SRC}/template-agent/config/agent/PROMPT.md" \
       || die "could not set the model in PROMPT.md"
 
-    step "baking the agent config layer"
-    printf 'FROM localhost/template-agent:local\nCOPY --chown=65532:root config/agent /app/config/agent\n' \
-      > "${SRC}/Containerfile.config"
+    step "baking the agent config and built-in tools"
+    # Declare the tool in PROMPT.md so the capability manifest admits it:
+    # an unlisted tool is assembled into the graph and then filtered back
+    # out by enforce_capability, which looks like the tool silently not
+    # existing.
+    if ! grep -q 'openshell_run_code' "${SRC}/template-agent/config/agent/PROMPT.md"; then
+      sed -i.bak -E 's|^tools:$|tools:\n  - openshell_run_code|' \
+        "${SRC}/template-agent/config/agent/PROMPT.md"
+      rm -f "${SRC}/template-agent/config/agent/PROMPT.md.bak"
+      grep -q 'openshell_run_code' "${SRC}/template-agent/config/agent/PROMPT.md" \
+        || die "could not add openshell_run_code to the PROMPT.md tools list"
+    fi
+    cp "${ROOT_DIR}/apps/template-agent/patch/builtin_tools.py" \
+       "${SRC}/template-agent/builtin_tools.py"
     "${CE}" build -q -t localhost/template-agent:local-config \
-      -f "${SRC}/Containerfile.config" "${SRC}/template-agent" >/dev/null \
-      || die "config layer build failed"
+      -f "${ROOT_DIR}/apps/template-agent/patch/Containerfile.agent" \
+      "${SRC}/template-agent" >/dev/null \
+      || die "agent config/tools layer build failed"
 
     step "loading images into ${CLUSTER_NAME}"
     _load localhost/template-agent:local-config
