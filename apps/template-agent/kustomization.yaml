@@ -325,3 +325,20 @@ patches:
                         name: agent-google-creds
                         key: credentials.json
                         optional: true
+  # --- UI rate limit ---------------------------------------------------------
+  # Upstream ships 100 requests/minute, which the chat UI exhausts quickly
+  # once a conversation is streaming. The whole ConfigMap value has to be
+  # restated: ui.yaml is a single string key, and kustomize cannot patch
+  # inside it.
+  - target: { kind: ConfigMap, name: ui-config }
+    patch: |
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+          "name": "ui-config"
+        },
+        "data": {
+          "ui.yaml": "server:\n  host: \"0.0.0.0\"\n  port: 8080\n  body_limit: 1048576\nlogging:\n  level: info\ncors:\n  origin: \"http://localhost:5173\"\nsecurity:\n  helmet:\n    enabled: true\n    csp:\n      default_src: [\"'self'\"]\n      script_src: [\"'self'\", \"'unsafe-inline'\"]\n      style_src: [\"'self'\", \"'unsafe-inline'\"]\n      img_src: [\"'self'\", \"data:\", \"blob:\"]\n      connect_src: [\"'self'\"]\n      font_src: [\"'self'\"]\n      object_src: [\"'none'\"]\n      frame_ancestors: [\"'none'\"]\n    cross_origin_embedder_policy: false\n  rate_limit:\n    enabled: true\n    max: 20000\n    window: \"1 minute\"\n    exclude_paths:\n      - \"/api/health\"\n      - \"/_health\"\n  session:\n    secure_cookie: false\n    max_age_days: 30\notel:\n  enabled: false\n  service_name: \"template-ui\"\nannouncement:\n  enabled: false\n  message: \"\"\n  type: info\n"
+        }
+      }

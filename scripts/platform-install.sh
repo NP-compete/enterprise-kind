@@ -477,6 +477,28 @@ kc label namespace openshell-sandboxes \
 
 helm_install openshell openshell oci://ghcr.io/nvidia/openshell/helm-chart \
   "${CHART_OPENSHELL}" "$(render "${V}/openshell.yaml")"
+# The supervisor pods run in sandboxNamespace but mount the gateway's
+# client TLS secret, which the chart only creates in the release namespace.
+# With both in one namespace that is invisible; we split them on purpose so
+# sandboxes stay policed by Kyverno, which makes the secret a cross-namespace
+# dependency the chart does not handle. Without this the supervisor sits in
+# ContainerCreating with "secret openshell-client-tls not found" and the
+# gateway rolls the sandbox back as a failed bootstrap.
+for _ in $(seq 1 30); do
+  kc -n openshell get secret openshell-client-tls >/dev/null 2>&1 && break
+  sleep 5
+done
+if kc -n openshell get secret openshell-client-tls >/dev/null 2>&1; then
+  kc -n openshell get secret openshell-client-tls -o json \
+    | jq 'del(.metadata.namespace,.metadata.uid,.metadata.resourceVersion,
+              .metadata.creationTimestamp,.metadata.ownerReferences,
+              .metadata.managedFields,.metadata.annotations)' \
+    | kc -n openshell-sandboxes apply -f - >/dev/null
+  ok "client TLS replicated into openshell-sandboxes (supervisor needs it there)"
+else
+  warn "openshell-client-tls never appeared; sandboxes will fail to bootstrap"
+fi
+
 ok "openshell gateway ready (make openshell)"
 
 kc apply -f "${M}/platform-quotas.yaml" >/dev/null

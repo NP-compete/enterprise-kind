@@ -127,3 +127,26 @@ spec:
         memory: 32Mi
       default:
         memory: 512Mi
+---
+# OpenShell's gateway creates supervisor and workload pods with no resource
+# requests, and its API exposes no way to set them -- ResourceRequirements
+# in the gRPC schema covers GPU only. Kyverno's require-resource-requests
+# then rejects every sandbox at admission.
+#
+# A LimitRange supplies the defaults natively, so the namespace keeps full
+# policy enforcement rather than being exempted. Sandboxes run untrusted
+# agent-authored code; exempting them would be the wrong trade.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: sandbox-defaults
+  namespace: openshell-sandboxes
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 50m
+        memory: 128Mi
+      default:
+        cpu: "1"
+        memory: 512Mi

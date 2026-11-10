@@ -66,7 +66,16 @@ def _manifest(name: str) -> dict:
         },
         "spec": {
             "podTemplate": {
-                "metadata": {"labels": {"sandbox": name}},
+                # Both labels on the POD, not just the Sandbox: the
+                # default-deny NetworkPolicy selects
+                # app.kubernetes.io/name=agent-code-sandbox, and a label
+                # present only on the parent CR selects nothing.
+                "metadata": {
+                    "labels": {
+                        "sandbox": name,
+                        "app.kubernetes.io/name": "agent-code-sandbox",
+                    }
+                },
                 "spec": {
                     # The snippet has no business talking to the API server.
                     "automountServiceAccountToken": False,
