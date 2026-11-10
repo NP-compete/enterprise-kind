@@ -7,9 +7,14 @@ deep_agent/aegra/graph.py.
 openshell_run_code executes a snippet inside a disposable OpenShell
 Sandbox (agents.x-k8s.io). One sandbox per call, deleted afterwards, so
 nothing persists between invocations and nothing the model writes to disk
-survives. The sandbox pod mounts no service account token and is subject
-to the cluster's NetworkPolicy -- which is enforced here because Calico is
-the CNI; Kubernetes accepts policy objects whether or not anything
+survives. The pod mounts no service account token, runs non-root with all
+capabilities dropped, and is covered by a default-deny egress
+NetworkPolicy (DNS only) shipped alongside this tool.
+
+That policy is ours: OpenShell's own only selects the pods its gateway
+manages and only restricts Ingress, so without it these sandboxes had
+full outbound network access. It is enforced because Calico is the CNI --
+Kubernetes accepts NetworkPolicy objects whether or not anything
 implements them.
 """
 

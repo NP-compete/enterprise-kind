@@ -9,3 +9,4 @@ kind: Kustomization
 # no permission to create sandboxes and the binding looked present.
 resources:
   - sandbox-rbac.yaml
+  - sandbox-netpol.yaml

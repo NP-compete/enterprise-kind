@@ -1,0 +1,39 @@
+---
+# Default-deny egress for agent-created sandboxes.
+#
+# Without this they had full outbound access: a snippet could resolve and
+# reach anything on the internet. OpenShell's own policy does not cover
+# them -- it selects openshell.ai/managed-by=openshell and only restricts
+# Ingress -- so these pods were unconstrained.
+#
+# DNS is allowed so failures are clean ("connection refused" rather than a
+# hang). Nothing else is: no internet, no cluster services, no API server.
+# Calico enforces this; on a cluster running kindnet the object would be
+# accepted and ignored, which is the trap this platform exists to avoid.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-code-sandbox-deny-egress
+  namespace: openshell-sandboxes
+  labels:
+    app.kubernetes.io/name: agent-code-sandbox
+    owner: platform-team
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-code-sandbox
+  policyTypes: [Egress, Ingress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+  # Ingress: nothing. The agent reaches these pods through the API server's
+  # exec endpoint, which does not traverse pod networking.
+  ingress: []
