@@ -26,7 +26,7 @@ import uuid
 
 from langchain_core.tools import tool
 
-NAMESPACE = os.environ.get("SANDBOX_NAMESPACE", "openshell-sandboxes")
+NAMESPACE = os.environ.get("SANDBOX_NAMESPACE", "template-agent")
 IMAGE = os.environ.get("SANDBOX_IMAGE", "docker.io/library/python:3.12-slim")
 READY_TIMEOUT = int(os.environ.get("SANDBOX_READY_TIMEOUT", "120"))
 MAX_OUTPUT = int(os.environ.get("SANDBOX_MAX_OUTPUT", "16000"))

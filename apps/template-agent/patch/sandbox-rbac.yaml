@@ -1,12 +1,11 @@
 ---
 # The agent creates and execs into Sandboxes for its openshell_run_code
-# tool. Scoped to the sandbox namespace only: no secrets, no other
-# namespaces, and no permission to read anything it does not create.
+# tool. Namespaced to template-agent, where the sandboxes now run: no
+# secrets, no other namespaces, nothing beyond what the tool needs.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: agent-sandbox-runner
-  namespace: openshell-sandboxes
   labels:
     app.kubernetes.io/name: template-agent
     owner: platform-team
@@ -30,7 +29,6 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: agent-sandbox-runner
-  namespace: openshell-sandboxes
   labels:
     app.kubernetes.io/name: template-agent
     owner: platform-team

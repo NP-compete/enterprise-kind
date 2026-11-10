@@ -1,5 +1,8 @@
 ---
-# Default-deny egress for agent-created sandboxes.
+# Default-deny egress for agent-created sandboxes, which now share the
+# template-agent namespace with the agent and UI. The selector targets only
+# pods labelled app.kubernetes.io/name=agent-code-sandbox, so the agent and
+# UI keep their own connectivity.
 #
 # Without this they had full outbound access: a snippet could resolve and
 # reach anything on the internet. OpenShell's own policy does not cover
@@ -14,7 +17,6 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: agent-code-sandbox-deny-egress
-  namespace: openshell-sandboxes
   labels:
     app.kubernetes.io/name: agent-code-sandbox
     owner: platform-team

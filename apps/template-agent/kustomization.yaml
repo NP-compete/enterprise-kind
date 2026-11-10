@@ -10,6 +10,8 @@ namespace: template-agent
 resources:
   - upstream.yaml
   - ui-sealedsecret.yaml
+  - patch/sandbox-rbac.yaml
+  - patch/sandbox-netpol.yaml
   - google-creds-sealedsecret.yaml
 
 # The agent image ships an EMPTY /app/config/agent: the Containerfile sets
