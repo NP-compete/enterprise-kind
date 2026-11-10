@@ -52,13 +52,28 @@ check "Loki has ingested pod logs" bash -c \
   "kubectl --context ${KUBECONTEXT} get --raw '/api/v1/namespaces/observability/services/loki-gateway:80/proxy/loki/api/v1/label/namespace/values' | jq -e '.data | length > 3'"
 check "Grafana datasources reachable" bash -c \
   "kubectl --context ${KUBECONTEXT} get --raw '/api/v1/namespaces/observability/services/kps-grafana:80/proxy/api/health' | jq -e '.database == \"ok\"'"
+check "Tempo is ready" bash -c \
+  "kubectl --context ${KUBECONTEXT} get --raw '/api/v1/namespaces/observability/services/tempo:3200/proxy/ready' | grep -qi ready"
+# The three pillars, asserted as data arriving rather than components being
+# up: a healthy Tempo with nothing in it is the failure mode that matters.
+check "traces reaching Tempo" bash -c \
+  "kubectl --context ${KUBECONTEXT} get --raw '/api/v1/namespaces/observability/services/tempo:3200/proxy/api/search?limit=1' \
+   | jq -e '(.traces // []) | length > 0'"
+check "agent metrics reaching Prometheus via OTLP" bash -c \
+  "kubectl --context ${KUBECONTEXT} get --raw '/api/v1/namespaces/observability/services/kps-prometheus:9090/proxy/api/v1/query?query=http_server_active_requests' \
+   | jq -e '[.data.result[]] | length > 0'"
+check "agent logs reaching Loki" bash -c \
+  "kubectl --context ${KUBECONTEXT} get --raw '/api/v1/namespaces/observability/services/loki-gateway:80/proxy/loki/api/v1/label/namespace/values' \
+   | jq -e '.data | index(\"template-agent\")'"
+check "Grafana has a Tempo datasource" bash -c \
+  "kubectl --context ${KUBECONTEXT} -n observability get cm -o yaml | grep -q 'type: tempo'"
 check "Alloy running on every node" bash -c \
   "test \"\$(kubectl --context ${KUBECONTEXT} -n observability get ds alloy -o jsonpath='{.status.numberReady}')\" = \"\$(kubectl --context ${KUBECONTEXT} -n observability get ds alloy -o jsonpath='{.status.desiredNumberScheduled}')\""
 
 echo; log "durability"
 check "object store serving S3" bash -c \
   "kubectl --context ${KUBECONTEXT} -n storage exec object-store-0 -- wget -qO- http://localhost:8333/status >/dev/null"
-for b in loki velero postgres etcd; do
+for b in loki tempo velero postgres etcd; do
   check "  bucket '${b}' exists" bash -c \
     "kubectl --context ${KUBECONTEXT} -n storage exec object-store-0 -- sh -c \"printf 'fs.ls /buckets\\n' | weed shell -master=localhost:9333 -filer=localhost:8888 2>/dev/null\" | grep -qw ${b}"
 done
@@ -132,7 +147,8 @@ check "Grafana state is in Postgres, not SQLite" bash -c \
 for ns in metallb-system trivy-system keda; do
   check "namespace ${ns} is absent" bash -c "! ${K} get namespace ${ns} >/dev/null 2>&1"
 done
-check "Tempo is not installed" bash -c "! ${K} -n observability get statefulset tempo >/dev/null 2>&1"
+check "Tempo is running" bash -c \
+  "test \"\$(kubectl --context ${KUBECONTEXT} -n observability get statefulset tempo -o jsonpath='{.status.readyReplicas}')\" -ge 1"
 check "Argo CD uses plain redis, not redis-ha" bash -c \
   "! ${K} -n argocd get statefulset argocd-redis-ha-server >/dev/null 2>&1"
 

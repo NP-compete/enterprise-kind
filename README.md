@@ -37,7 +37,7 @@ Start at **https://home.kind.test** — it links everything and shows live healt
 | `home.kind.test` | Landing page with cluster stats |
 | `headlamp.kind.test` | Cluster management UI |
 | `argocd.kind.test` | GitOps |
-| `grafana.kind.test` | Metrics, logs and dashboards (no traces: Tempo is not installed) |
+| `grafana.kind.test` | Metrics, logs, traces and dashboards |
 | `prometheus.kind.test` · `alertmanager.kind.test` | Raw PromQL, alert routing |
 | `keycloak.kind.test` | Identity provider |
 | `registry.kind.test` | Image registry UI |
@@ -96,8 +96,9 @@ the policy, and confirms the connection then times out.
 tags, hardened security contexts, and no workloads in `default`. Platform
 namespaces are excluded by label, so new components are covered automatically.
 
-**Durability** — S3-compatible object storage holds Loki chunks and Velero
-backups, so observability data outlives the node it ran on. Velero
+**Durability** — S3-compatible object storage holds Loki chunks, Tempo
+traces and Velero backups, so observability data outlives the node it ran
+on. Velero
 runs daily and hourly schedules; etcd snapshots every 6 hours into a separate
 bucket. `make restore-drill` proves the whole path.
 
@@ -150,6 +151,28 @@ Platform namespaces are labelled `platform.kind.local/component`. That label
 drives policy exclusions and CA distribution — remove it from a namespace and
 that namespace starts being policed as a tenant.
 
+## Observability
+
+Loki, Grafana and Tempo with Prometheus for metrics — LGT + Prometheus
+rather than full LGTM. Mimir would add multi-tenant metrics scale this
+cluster has no use for, at a cost of several pods; one Prometheus holding
+two days of data is the right size here.
+
+**Alloy** is the collector. It scrapes pod logs, ships Kubernetes events,
+and terminates OTLP on 4317/4318, fanning out to Tempo (traces),
+Prometheus (metrics) and Loki (logs). Anything that speaks OTLP only needs
+pointing at `alloy.observability.svc.cluster.local:4317`.
+
+The agent does exactly that, so its traces and metrics land in the same
+place as the platform's. Two things were needed and only one is obvious:
+the endpoint, and `ENABLE_OTEL=true` — the agent's master switch defaults
+off, so an endpoint alone configures an exporter that never starts.
+
+Grafana ties them together: trace→logs, trace→metrics, a service map, and
+a Loki derived field that turns a `trace_id` in a log line into a link to
+the trace. `make smoke` asserts data is actually arriving in all three,
+not merely that the components are up.
+
 ## Sandboxed agents (OpenShell)
 
 NVIDIA [OpenShell](https://docs.nvidia.com/openshell/kubernetes/setup) runs
@@ -187,7 +210,7 @@ These are real and mostly not fixable on one machine.
   a node container dying, but not the Mac dying. Everything stops together.
 - **Storage is not replicated, and backups share the cluster's fate.** The
   object store is a single replica on a local-path volume, and it holds
-  backups *and* logs. If that volume dies they go together. This
+  backups *and* logs *and* traces. If that volume dies they go together. This
   is the largest remaining gap: a real platform puts the backup target
   somewhere the cluster cannot take with it.
 - **`.secrets/` is unrecoverable if lost.** It holds the CA key, the etcd
@@ -207,7 +230,7 @@ These are real and mostly not fixable on one machine.
   losing the worker is a total outage. CI enforces that nothing scales back
   up, because doing so silently breaks the memory budget.
 - **Dropped to fit the budget:** MetalLB (so `type: LoadBalancer` stays
-  `<pending>` forever), Tempo (no tracing), trivy-operator (no image
+  `<pending>` forever), trivy-operator (no image
   scanning), KEDA (no event-driven autoscaling), and Argo CD's redis-ha.
   Each is one commit away in git history.
 - **Prometheus keeps 2 days at a 60s scrape, with cAdvisor series off.**
