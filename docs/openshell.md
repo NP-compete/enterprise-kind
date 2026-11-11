@@ -124,45 +124,64 @@ openshell gateway login kindprod
 openshell status
 ```
 
-## Known limitation: gateway-provisioned sandboxes
+## Gateway-provisioned sandboxes
 
-The gateway runs, authenticates and reports healthy, but it **cannot start
-sandboxes here**. Both settings of `server.enableUserNamespaces` fail, for
-two unrelated reasons:
+These work. `make smoke` creates one through the gateway and execs into it:
 
-| Setting | Failure |
-|---|---|
-| `true` | the pod sets `hostUsers: false` and the kubelet cannot create it at all: `failed to create network namespace: failed to set effective UID: invalid argument` |
-| `false` (what we ship) | the supervisor attaches its boundary, then dies with `failed to spawn sandbox entrypoint process: Permission denied` |
+```
+created  ee7de13d-…        workspace default, name probe
+pods     default--probe                        Running   ← the workload
+         os-supervisor-ee7de13d-…              Running   ← the boundary
+supervisor  "Isolation boundary attached"
+            "Isolation boundary enforcement confirmed"
+exec     exit 0 → uid 10001 · hostname default--probe · DNS resolves
+```
 
-The first is genuinely rootless podman. The node's own `uid_map` is
-`0→501 (1 id)` and `1→100000 (1M ids)`, and the kubelet advertises
-`KubeletInUserNamespace: true`; a pod user namespace has to be carved out
-of a range the runtime does not own.
+This was believed impossible for a long time, and the belief was wrong
+twice over. Both readings came from taking an error message at face value:
 
-The second is **not**, which took a measurement to establish. A probe pod
-with the supervisor's security posture — non-root, every capability
-dropped — on the same node:
+**"failed to spawn sandbox entrypoint process: Permission denied"** was read
+as rootless podman refusing to nest a user namespace. It is not. `unshare
+-U` succeeds inside the node container as root *and* as uid 1000, and a pod
+with the supervisor's exact posture — non-root, every capability dropped —
+gets Landlock ABI v9 and a working seccomp user-notification listener:
 
 | Syscall | `RuntimeDefault` | `Unconfined` |
 |---|---|---|
 | `landlock_create_ruleset(VERSION)` | ABI v9 | ABI v9 |
 | `seccomp(SET_MODE_FILTER, NEW_LISTENER)` | listener fd | listener fd |
-| `unshare(CLONE_NEWUSER)` | **EPERM** | **0** |
+| `unshare(CLONE_NEWUSER)` | EPERM | 0 |
 
-So Landlock and seccomp user-notification both work; the blocker is
-containerd's default seccomp profile, which denies `CLONE_NEWUSER` to
-containers without `CAP_SYS_ADMIN`. The chart hardcodes `RuntimeDefault`
-on sandbox pods and exposes no value to change it, and this cluster's
-`openshell-sandboxes` namespace enforces PodSecurity `baseline`, which
-forbids `Unconfined` outright. A custom `Localhost` profile is allowed
-under `baseline` and would be the way in, if this is ever worth pursuing.
+That `EPERM` is real — containerd's default profile denies `CLONE_NEWUSER`
+without `CAP_SYS_ADMIN` — but it was never what stopped the sandbox.
 
-`false` is the better failure of the two: it fails inside a pod that policy
-already constrains, rather than in the kubelet. The agent's own sandbox tool
-therefore drives the Agent Sandbox CRD directly (see
-`apps/template-agent/patch/openshell_backend.py`), which works because those
-pods do not set `hostUsers`.
+**The actual failure was TLS.** The chart's `pkiInitJob` hook runs on every
+upgrade and writes `openshell-client-tls` itself, even when
+`certManager.enabled=true` owns everything else. That left the supervisor
+verifying the gateway against the hook's CA while the gateway served a
+cert-manager one, so the supervisor closed the connection with `received
+fatal alert: UnknownCA` — visible only in the *gateway's* log. The
+supervisor's own message, `Startup configuration fetch failed after 5
+attempts`, names nothing. `platform-install.sh` now deletes any openshell
+TLS secret lacking cert-manager's annotation so it gets reissued.
+
+Do **not** widen the sandbox pods' seccomp profile to "help" the
+supervisor. The gateway inspects the pod it admitted and refuses to use it:
+`admitted workload Pod does not preserve capability-free isolation: numeric
+identity, groups, or seccomp profile changed`. A Kyverno mutation that
+rewrote the profile was rejected exactly this way.
+
+`server.enableUserNamespaces: true` does remain broken, and that one really
+is rootless podman: it sets `hostUsers: false` and the kubelet answers
+`failed to create network namespace: failed to set effective UID: invalid
+argument`. The node's `uid_map` is `0→501 (1 id)` and `1→100000 (1M ids)`
+with `KubeletInUserNamespace: true`, so a pod mapping cannot be carved from
+a range the runtime does not own. `false` is the supported path here and it
+is enough.
+
+The agent still drives the Agent Sandbox CRD directly rather than going
+through the gateway (see `apps/template-agent/patch/openshell_backend.py`) —
+that predates this working and is a separate choice, not a workaround.
 
 ## The agent's sandbox runtimes
 

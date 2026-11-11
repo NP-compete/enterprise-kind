@@ -173,6 +173,43 @@ ensure_client openshell-cli "$(jq -n '{
                "oauth2.device.authorization.grant.enabled":"true"}
 }')"
 
+# A machine identity for the gateway, so verification does not depend on a
+# human completing a browser login. openshell-cli cannot do this: it is a
+# public client with no secret and no password grant, deliberately.
+#
+# The audience mapper still says openshell-cli, because that is the API
+# resource server's audience -- the thing the gateway validates `aud`
+# against -- not the identity of whoever is calling.
+if [[ -s "${ROOT_DIR}/.secrets/oidc-secret-openshell-ci" ]]; then
+  ensure_client openshell-ci "$(jq -n \
+    --arg sec "$(cat "${ROOT_DIR}/.secrets/oidc-secret-openshell-ci")" '{
+      clientId: "openshell-ci", name: "OpenShell verification", enabled: true,
+      protocol: "openid-connect", publicClient: false, secret: $sec,
+      standardFlowEnabled: false, implicitFlowEnabled: false,
+      directAccessGrantsEnabled: false, serviceAccountsEnabled: true,
+      defaultClientScopes: ["acr","basic","roles"],
+      protocolMappers: [{
+        name: "openshell-audience", protocol: "openid-connect",
+        protocolMapper: "oidc-audience-mapper",
+        config: {"included.client.audience":"openshell-cli",
+                 "id.token.claim":"false","access.token.claim":"true"}}]
+    }')"
+
+  # The service account is a user in its own right, so the realm role goes
+  # on that user -- assigning it to the client does nothing.
+  ci_id="$(api "${BASE}/admin/realms/${REALM}/clients?clientId=openshell-ci" | jq -r '.[0].id // empty')"
+  if [[ -n "${ci_id}" ]]; then
+    sa_id="$(api "${BASE}/admin/realms/${REALM}/clients/${ci_id}/service-account-user" | jq -r '.id // empty')"
+    if [[ -n "${sa_id}" ]]; then
+      api -X POST -H 'Content-Type: application/json' \
+        "${BASE}/admin/realms/${REALM}/users/${sa_id}/role-mappings/realm" \
+        -d "$(api "${BASE}/admin/realms/${REALM}/roles/openshell-admin" | jq -c '[{id,name}]')" \
+        >/dev/null 2>&1 || true
+      ok "openshell-ci service account holds openshell-admin"
+    fi
+  fi
+fi
+
 
 # The `groups` scope is ours, so create it here rather than in the realm import.
 if ! scope_list | grep -q '^groups='; then

@@ -196,6 +196,25 @@ check "gateway validates Keycloak tokens" bash -c \
      | grep -q 'issuer = \"https://keycloak.${BASE_DOMAIN}'"
 check "gateway trusts the CA Keycloak is served from" bash -c \
   "kubectl --context ${KUBECONTEXT} -n openshell get configmap platform-ca >/dev/null"
+# The supervisor verifies the gateway against the ca.crt replicated into the
+# sandbox namespace. When the chart's pkiInitJob hook rewrites that secret
+# behind cert-manager's back the two CAs diverge, the supervisor answers
+# "UnknownCA", and the only visible symptom is a sandbox that never
+# bootstraps. Comparing serials catches it before anyone tries to use one.
+check "supervisor's CA matches the gateway's certificate" bash -c \
+  "test \"\$(kubectl --context ${KUBECONTEXT} -n openshell-sandboxes get secret openshell-client-tls \
+       -o jsonpath='{.data.ca\\.crt}' | base64 -d | openssl x509 -noout -serial)\" \
+     = \"\$(kubectl --context ${KUBECONTEXT} -n openshell get secret openshell-server-tls \
+       -o jsonpath='{.data.ca\\.crt}' | base64 -d | openssl x509 -noout -serial)\""
+# The machine identity that lets this be verified without a browser login.
+check "openshell-ci token carries the gateway audience and admin role" bash -c \
+  "curl -sk --max-time 20 https://keycloak.${BASE_DOMAIN}${suffix}/realms/platform/protocol/openid-connect/token \
+     -d grant_type=client_credentials -d client_id=openshell-ci \
+     -d client_secret=\$(cat ${ROOT_DIR}/.secrets/oidc-secret-openshell-ci) \
+   | jq -r .access_token | cut -d. -f2 \
+   | { read -r p; printf '%s' \"\${p}\$(printf '=%.0s' \$(seq 1 \$(( (4 - \${#p} % 4) % 4 ))))\" | base64 -d 2>/dev/null; } \
+   | jq -e '(.aud | if type==\"array\" then . else [.] end | index(\"openshell-cli\")) \
+            and (.realm_access.roles | index(\"openshell-admin\"))' >/dev/null"
 # The agent's sandbox runtimes are built and side-loaded, not pulled, so a
 # missing one fails at the first tool call with ImagePullBackOff rather
 # than at install time. Node images list what the CRI actually holds.

@@ -62,6 +62,9 @@ OIDC_SECRET_HEADLAMP="$(gen oidc-secret-headlamp 40)"
 OIDC_SECRET_OAUTH2PROXY="$(gen oidc-secret-oauth2-proxy 40)"
 OIDC_SECRET_VAULT="$(gen oidc-secret-vault 40)"
 OIDC_SECRET_TEMPLATE_AGENT="$(gen oidc-secret-template-agent 40)"
+# Machine identity for verifying the OpenShell gateway end to end. Only
+# identity.sh and verify.sh read it; nothing in the cluster needs it.
+gen oidc-secret-openshell-ci 40 >/dev/null
 OAUTH2_PROXY_COOKIE_SECRET="$(gen oauth2-proxy-cookie-secret 32)"
 export GRAFANA_ADMIN_PASSWORD KEYCLOAK_DB_PASSWORD GRAFANA_DB_PASSWORD \
        OIDC_SECRET_GRAFANA OIDC_SECRET_ARGOCD \
@@ -488,6 +491,24 @@ helm_install openshell openshell oci://ghcr.io/nvidia/openshell/helm-chart \
 # dependency the chart does not handle. Without this the supervisor sits in
 # ContainerCreating with "secret openshell-client-tls not found" and the
 # gateway rolls the sandbox back as a failed bootstrap.
+# certManager.enabled makes cert-manager the owner of the TLS material, but
+# the chart's pkiInitJob hook still runs and still writes openshell-client-tls
+# itself. The result is a client secret carrying the hook's CA while the
+# gateway serves a certificate signed by cert-manager's -- and the supervisor,
+# which verifies the gateway against that ca.crt, closes the connection with
+# "received fatal alert: UnknownCA". The sandbox then dies at "Startup
+# configuration fetch failed after 5 attempts", which says nothing about
+# certificates at all.
+#
+# cert-manager annotates every secret it owns. Anything here without that
+# annotation came from the hook and is stale by definition.
+for s in openshell-ca-tls openshell-server-tls openshell-client-tls; do
+  kc -n openshell get secret "${s}" >/dev/null 2>&1 || continue
+  [[ -n "$(kc -n openshell get secret "${s}" \
+      -o jsonpath='{.metadata.annotations.cert-manager\.io/certificate-name}')" ]] && continue
+  kc -n openshell delete secret "${s}" >/dev/null
+  warn "removed hook-created ${s}; cert-manager will reissue it"
+done
 for _ in $(seq 1 30); do
   kc -n openshell get secret openshell-client-tls >/dev/null 2>&1 && break
   sleep 5

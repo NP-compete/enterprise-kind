@@ -215,6 +215,11 @@ Three things worth knowing:
   SNI, so nothing in the path sees plaintext. A proxy cannot present a
   client certificate for a user, so mTLS is off and users present a bearer
   token instead, with `platform-admins` mapped to the gateway's admin role.
+- **Gateway-provisioned sandboxes work**, supervisor and workload pod both,
+  with `make smoke` creating one and exec'ing into it. They were thought
+  impossible under rootless podman for a long time; the real cause was a
+  CA mismatch, not user namespaces. [docs/openshell.md](docs/openshell.md)
+  has the autopsy.
 
 ## Known limits
 

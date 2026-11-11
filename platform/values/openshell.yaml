@@ -66,34 +66,34 @@ server:
     # token is rejected. platform-install.sh puts this ConfigMap in the
     # namespace.
     caConfigMapName: platform-ca
-  # Left false. Both settings fail here, for unrelated reasons -- measured,
-  # not inferred (see docs/openshell.md):
+  # False, and that is the working configuration -- gateway-provisioned
+  # sandboxes DO run here. `make smoke` creates one and execs into it.
   #
-  #   true  -> hostUsers: false, and the kubelet cannot create the pod at
-  #            all: "failed to create network namespace: failed to set
-  #            effective UID: invalid argument". This one really is rootless
-  #            podman: the node's own uid_map is 0->501 and 1->100000, the
-  #            kubelet runs with KubeletInUserNamespace=true, and a pod
-  #            mapping cannot be carved out of a range the runtime does not
-  #            own.
+  # This was believed impossible for a long time, on the strength of two
+  # error messages. Both readings were wrong:
   #
-  #   false -> the supervisor starts and dies with "failed to spawn sandbox
-  #            entrypoint process: Permission denied". NOT a rootless-podman
-  #            limitation. A probe pod with the same security posture
-  #            (non-root, all capabilities dropped) shows Landlock (ABI v9)
-  #            and seccomp user-notification both working, and
-  #            unshare(CLONE_NEWUSER) returning EPERM under RuntimeDefault
-  #            but succeeding under Unconfined. The blocker is containerd's
-  #            default seccomp profile, which denies CLONE_NEWUSER to
-  #            containers without CAP_SYS_ADMIN. The chart offers no way to
-  #            change the sandbox pods' profile.
+  #   "failed to spawn sandbox entrypoint process: Permission denied" was
+  #   read as rootless podman refusing to nest a user namespace. It is not:
+  #   `unshare -U` succeeds inside the node as root and as uid 1000, and a
+  #   pod with the supervisor's posture gets Landlock ABI v9 and a working
+  #   seccomp user-notification listener. What actually broke the sandbox
+  #   was TLS -- see the hook-created-secret cleanup in platform-install.sh.
   #
-  # false is still the better failure: it fails inside a pod that policy
-  # already constrains, rather than in the kubelet.
+  #   The supervisor's real failure is "received fatal alert: UnknownCA",
+  #   visible only in the gateway's log; the supervisor itself reports
+  #   "Startup configuration fetch failed after 5 attempts", which names
+  #   nothing.
   #
-  # The gateway itself is fine; only its sandbox provisioning is blocked.
-  # The agent's built-in tool therefore drives Agent Sandbox directly, which
-  # works because those pods neither set hostUsers nor need a user namespace.
+  # true remains broken, and that one really is rootless podman: it sets
+  # hostUsers: false, and the kubelet answers "failed to create network
+  # namespace: failed to set effective UID: invalid argument". The node's
+  # uid_map is 0->501 and 1->100000 with KubeletInUserNamespace=true, so a
+  # pod mapping cannot be carved out of a range the runtime does not own.
+  #
+  # Do not try to widen the sandbox pods' seccomp profile to "help" the
+  # supervisor. The gateway inspects the admitted pod and refuses it:
+  # "admitted workload Pod does not preserve capability-free isolation:
+  # numeric identity, groups, or seccomp profile changed".
   enableUserNamespaces: false
   tls:
     # Off, deliberately. The gateway is reached through ingress now, and
