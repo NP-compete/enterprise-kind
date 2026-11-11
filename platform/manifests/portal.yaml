@@ -156,10 +156,20 @@ data:
             siteMonitor: https://vault.${BASE_DOMAIN}${URL_SUFFIX}/v1/sys/health?standbyok=true&sealedcode=200&uninitcode=200
             description: Secret store of record -- root token in .secrets/vault-root-token
             icon: vault.png
+        # Deep-links to the platform realm, but the admin console itself
+        # always authenticates against `master` -- so this takes the
+        # "keycloak admin console" password from `make secrets`, NOT the
+        # SSO password that works everywhere else on this page. Two
+        # accounts are both called soham; that catches people out.
         - Keycloak:
-            href: https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/admin
+            href: "https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/admin/master/console/#/platform"
             siteMonitor: https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/realms/platform/.well-known/openid-configuration
-            description: Realm, clients, groups and users -- the source of all logins
+            description: Platform realm admin -- log in with the MASTER admin password, not SSO
+            icon: keycloak.png
+        - My account:
+            href: https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/realms/platform/account
+            siteMonitor: https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/realms/platform/.well-known/openid-configuration
+            description: Your own profile, password and sessions -- SSO login
             icon: keycloak.png
 
     - Cluster:
