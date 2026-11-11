@@ -1,0 +1,306 @@
+# openshell-webui -- a read-only browser console over the OpenShell gateway.
+#
+# Unofficial community project (github.com/shaharia-lab/openshell-webui,
+# MIT); not affiliated with NVIDIA. Deployed to inspect and validate the
+# sandboxes the agent runs code in.
+#
+# AUTHENTICATION -- two separate layers, do not confuse them:
+#
+#  1. Browser -> UI. The UI has no login of its own; upstream is explicit
+#     that "There is no login", and whoever reaches the port inherits the
+#     gateway identity it holds. The Ingress therefore sits behind
+#     oauth2-proxy, the same three annotations vault, kps-prometheus,
+#     registry-ui and whisker use here. Without them this is an
+#     unauthenticated gateway console on a routable hostname.
+#
+#  2. UI -> gateway. The gateway is OIDC-authenticated: an unauthenticated
+#     RPC comes back "missing authorization header", and a client
+#     certificate does not satisfy it -- mTLS is transport identity, not an
+#     authorization header. `make openshell` registers the CLI with
+#     --oidc-issuer/--oidc-client-id and then runs an interactive `gateway
+#     login`, which a pod cannot do. So the sidecar below mints a
+#     client-credentials token and keeps oidc_token.json fresh; the UI
+#     re-reads that file on every call.
+#
+# It runs with --read-only: it can list and inspect, not create or delete.
+#
+# IDENTITY: it reuses the agent's machine identity (template-agent-sandbox)
+# deliberately. The point of this console is to show what the agent sees,
+# and sandbox visibility is scoped per principal -- a separate identity
+# could paint a different and misleading picture. Read-only means it can
+# observe as the agent, not act as it.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openshell-webui-registry
+  namespace: openshell
+  labels:
+    app.kubernetes.io/name: openshell-webui
+data:
+  # The UI reuses the OpenShell CLI's on-disk gateway registry rather than
+  # having config of its own, so this mimics ~/.config/openshell, with
+  # XDG_CONFIG_HOME pointed at /config.
+  metadata.json: |
+    {
+      "name": "openshell",
+      "gateway_endpoint": "https://openshell.${BASE_DOMAIN}${URL_SUFFIX}",
+      "is_remote": true,
+      "gateway_port": 0,
+      "auth_mode": "oidc"
+    }
+  refresh-token.py: |
+    """Keep oidc_token.json fresh for the UI.
+
+    Writes the bundle shape the CLI and SDK both use -- access_token plus
+    an integer expires_at -- so the UI's per-call read finds a valid
+    bearer without anyone having logged in interactively.
+    """
+    import json
+    import os
+    import pathlib
+    import sys
+    import tempfile
+    import time
+    import urllib.parse
+    import urllib.request
+
+    ISSUER = os.environ["OIDC_ISSUER"].rstrip("/")
+    CLIENT_ID = os.environ["OIDC_CLIENT_ID"]
+    CLIENT_SECRET = os.environ["OIDC_CLIENT_SECRET"]
+    GATEWAY_DIR = pathlib.Path(os.environ["GATEWAY_DIR"])
+    # Refresh ahead of expiry: the UI reads per call, and a token that
+    # lapses between write and read surfaces as a baffling 401.
+    GRACE = int(os.environ.get("REFRESH_GRACE_SECONDS", "60"))
+
+
+    def token_endpoint():
+        url = ISSUER + "/.well-known/openid-configuration"
+        with urllib.request.urlopen(url, timeout=15) as r:
+            return json.load(r)["token_endpoint"]
+
+
+    def mint(endpoint):
+        body = urllib.parse.urlencode({
+            "grant_type": "client_credentials",
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+        }).encode()
+        req = urllib.request.Request(endpoint, data=body, headers={
+            "content-type": "application/x-www-form-urlencoded",
+            "accept": "application/json",
+        })
+        with urllib.request.urlopen(req, timeout=15) as r:
+            payload = json.load(r)
+        return payload["access_token"], int(payload.get("expires_in", 300))
+
+
+    def write(token, expires_in):
+        bundle = {
+            "access_token": token,
+            "expires_at": int(time.time()) + expires_in,
+            "issuer": ISSUER,
+        }
+        GATEWAY_DIR.mkdir(parents=True, exist_ok=True)
+        # Atomic replace: the UI may read at any moment, and a
+        # half-written bundle is an unparseable token.
+        fd, tmp = tempfile.mkstemp(
+            prefix=".oidc_token.", suffix=".tmp", dir=str(GATEWAY_DIR))
+        with os.fdopen(fd, "w") as fh:
+            json.dump(bundle, fh, indent=2)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, GATEWAY_DIR / "oidc_token.json")
+
+
+    def main():
+        endpoint = None
+        while True:
+            try:
+                if endpoint is None:
+                    endpoint = token_endpoint()
+                token, expires_in = mint(endpoint)
+                write(token, expires_in)
+                print("token refreshed, expires in %ss" % expires_in, flush=True)
+                if os.environ.get("ONE_SHOT"):
+                    return 0
+                time.sleep(max(expires_in - GRACE, 30))
+            except Exception as exc:  # noqa: BLE001 - the loop must not die
+                print("refresh failed: %s: %s" % (type(exc).__name__, exc),
+                      flush=True)
+                if os.environ.get("ONE_SHOT"):
+                    return 1
+                # Rediscover next time round; the issuer may have moved.
+                endpoint = None
+                time.sleep(15)
+
+
+    sys.exit(main())
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openshell-webui
+  namespace: openshell
+  labels:
+    app.kubernetes.io/name: openshell-webui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openshell-webui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openshell-webui
+    spec:
+      initContainers:
+        # Lay out the gateway registry and mint the first token, so the UI
+        # never starts against a missing oidc_token.json.
+        - name: token-init
+          image: registry.access.redhat.com/hi/python:3.14-builder
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              mkdir -p /config/openshell/gateways/openshell
+              printf 'openshell' > /config/openshell/active_gateway
+              cp /registry/metadata.json /config/openshell/gateways/openshell/metadata.json
+              ONE_SHOT=1 python3 /registry/refresh-token.py
+          env: &tokenenv
+            - name: OIDC_ISSUER
+              value: "https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/realms/platform"
+            - name: GATEWAY_DIR
+              value: /config/openshell/gateways/openshell
+            - name: OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef: { name: openshell-webui-oidc, key: client_id }
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: { name: openshell-webui-oidc, key: client_secret }
+            # Keycloak and the gateway are both platform-CA issued.
+            - name: SSL_CERT_FILE
+              value: /etc/platform-ca/ca.crt
+            - name: REQUESTS_CA_BUNDLE
+              value: /etc/platform-ca/ca.crt
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: registry, mountPath: /registry, readOnly: true }
+            - { name: gateway-home, mountPath: /config/openshell }
+            - { name: platform-ca, mountPath: /etc/platform-ca, readOnly: true }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+      containers:
+        - name: webui
+          image: ghcr.io/shaharia-lab/openshell-webui:latest
+          args: ["--read-only"]
+          env:
+            # Must bind all interfaces for the ingress to reach it. The
+            # protection is oauth2-proxy on the Ingress, not this address.
+            - name: OPENSHELL_UI_ADDR
+              value: "0.0.0.0:8787"
+            - name: XDG_CONFIG_HOME
+              value: /config
+            - name: XDG_STATE_HOME
+              value: /state
+            - name: OPENSHELL_UI_NO_UPDATE_CHECK
+              value: "1"
+            # The UI validates Host; the ingress hostname has to be listed
+            # or every proxied request is rejected.
+            - name: OPENSHELL_UI_ALLOWED_HOSTS
+              value: "openshell-ui.${BASE_DOMAIN}${URL_SUFFIX},127.0.0.1:8787,localhost:8787"
+            # gRPC uses its own bundled roots and ignores SSL_CERT_FILE.
+            - name: GRPC_DEFAULT_SSL_ROOTS_FILE_PATH
+              value: /etc/platform-ca/ca.crt
+            - name: SSL_CERT_FILE
+              value: /etc/platform-ca/ca.crt
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: gateway-home, mountPath: /config/openshell, readOnly: true }
+            - { name: platform-ca, mountPath: /etc/platform-ca, readOnly: true }
+            - { name: state, mountPath: /state }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 512Mi }
+        - name: token-refresh
+          image: registry.access.redhat.com/hi/python:3.14-builder
+          command: ["python3", "/registry/refresh-token.py"]
+          env: *tokenenv
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: registry, mountPath: /registry, readOnly: true }
+            - { name: gateway-home, mountPath: /config/openshell }
+            - { name: platform-ca, mountPath: /etc/platform-ca, readOnly: true }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+      volumes:
+        - name: registry
+          configMap:
+            name: openshell-webui-registry
+        - name: platform-ca
+          configMap:
+            name: platform-ca
+        # Writable: the refresher rewrites oidc_token.json in place.
+        - name: gateway-home
+          emptyDir: {}
+        - name: state
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openshell-webui
+  namespace: openshell
+  labels:
+    app.kubernetes.io/name: openshell-webui
+spec:
+  selector:
+    app.kubernetes.io/name: openshell-webui
+  ports:
+    - name: http
+      port: 8787
+      targetPort: 8787
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: openshell-webui
+  namespace: openshell
+  labels:
+    app.kubernetes.io/name: openshell-webui
+  annotations:
+    cert-manager.io/cluster-issuer: platform-ca
+    # These three are the only thing between a routable hostname and full
+    # gateway control. Same pattern as vault, kps-prometheus, registry-ui
+    # and whisker. Do not remove them.
+    nginx.ingress.kubernetes.io/auth-url: "http://oauth2-proxy.identity.svc.cluster.local/oauth2/auth"
+    nginx.ingress.kubernetes.io/auth-signin: "https://auth.${BASE_DOMAIN}${URL_SUFFIX}/oauth2/start?rd=$scheme://$best_http_host$escaped_request_uri"
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-User,X-Auth-Request-Email,X-Auth-Request-Groups"
+    # xterm.js and log streaming use WebSockets and SSE.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - openshell-ui.${BASE_DOMAIN}${URL_SUFFIX}
+      secretName: openshell-webui-tls
+  rules:
+    - host: openshell-ui.${BASE_DOMAIN}${URL_SUFFIX}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: openshell-webui
+                port:
+                  number: 8787

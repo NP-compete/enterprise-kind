@@ -11,7 +11,7 @@ source "${ROOT_DIR}/config.env"
 
 export CLUSTER_NAME NODE_IMAGE HTTP_PORT HTTPS_PORT API_SERVER_PORT BASE_DOMAIN \
        REGISTRY_NAME REGISTRY_HOST_PORT CONTAINER_ENGINE NODE_IMAGE_ETCD PLATFORM_HOSTS SEALED_SECRETS_VERSION COSIGN_VERSION \
-       PG_INSTANCES CHART_OPENSHELL AGENT_SANDBOX_VERSION AGENT_MODEL
+       PG_INSTANCES CHART_OPENSHELL AGENT_SANDBOX_VERSION AGENT_MODEL PREVIEW_WORKTREES
 # Identity passwords are generated into .secrets/ on first install rather than
 # living in config.env. Resolve them here so every script -- urls, smoke
 # tests, keycloak-reconcile, demo -- sees the same value without each one
@@ -95,6 +95,18 @@ hint() {
 }
 
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
+
+# load_image <image> -- put a locally built image into the cluster's
+# containerd. `kind load docker-image` reads docker's store and cannot see
+# podman's, so go through an archive either way.
+load_image() {
+  local img="$1" tar
+  tar="${BUILD_DIR}/$(tr '/:' '__' <<<"${img}").tar"
+  "${CE}" save -o "${tar}" "${img}" >/dev/null 2>&1 || die "could not save ${img}"
+  kind load image-archive "${tar}" --name "${CLUSTER_NAME}" >/dev/null 2>&1 \
+    || die "could not load ${img} into ${CLUSTER_NAME}"
+  rm -f "${tar}"
+}
 
 # rand_alnum <length> -- random A-Za-z0-9 string.
 #

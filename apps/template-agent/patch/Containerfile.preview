@@ -1,0 +1,17 @@
+# Config layer for a branch preview.
+#
+# Previews build template-agent from the worktree's own Containerfile, so
+# unlike Containerfile.agent there is nothing to patch in here: whatever the
+# branch does to deep_agent/ is already in the base image. The two sed fork
+# points that Containerfile.agent applies to the published image are real
+# source edits on the branches that want them.
+#
+# All that is left is config. Upstream's image deliberately ships an empty
+# /app/config/agent and expects a mount; the k8s overlay mounts nothing, and
+# the tree is nested so a ConfigMap cannot express it. Baking it also means
+# the preview's config is versioned with the preview's code, which is the
+# point of a branch preview.
+ARG PREVIEW_BASE_IMAGE
+FROM ${PREVIEW_BASE_IMAGE}
+
+COPY --chown=65532:root config/agent /app/config/agent

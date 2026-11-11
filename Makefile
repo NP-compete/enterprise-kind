@@ -4,7 +4,8 @@ S := ./scripts
 
 .PHONY: help create delete up install all down clean reset status urls secrets smoke token trust-ca untrust-ca \
         demo demo-load demo-down logs dashboards reinstall gitops-bootstrap push k9s openshell agent-stack agent-creds \
-        hosts unhosts break-glass seal restore-drill sign lint failover-drill doctor _sudo
+        hosts unhosts break-glass seal restore-drill sign lint failover-drill doctor _sudo \
+        preview-add preview-build preview-up preview-list preview-hosts preview-sso preview-portal preview-rm
 
 help: ## Show this help
 	@awk 'BEGIN{FS=":.*##"; printf "\n\033[1mkind production platform\033[0m\n\n"} \
@@ -118,6 +119,31 @@ agent-stack: ## Build and deploy the Red Hat template-agent + template-ui stack
 agent-creds: ## Install Google service account JSON for the agent (FILE=/path/to/key.json)
 	@test -n "$(FILE)" || { echo "usage: make agent-creds FILE=/path/to/service-account.json"; exit 1; }
 	@FILE=$(FILE) $(S)/ops.sh agent-creds
+
+##@ Branch previews
+# Each preview is a worktree of template-agent + template-ui deployed into
+# its own namespace, sharing the main stack's postgres and redis. Run
+# `make agent-stack` once first -- that is what the previews share.
+preview-add: ## Create a preview worktree (NAME=feat [AGENT_REF=... UI_REF=...])
+	@test -n "$(NAME)" || { echo "usage: make preview-add NAME=<name> [AGENT_REF=<ref> UI_REF=<ref>]"; exit 1; }
+	@$(S)/preview.sh add $(NAME) $(AGENT_REF) $(UI_REF)
+preview-build: ## Build a preview's images from its worktree (NAME=feat)
+	@test -n "$(NAME)" || { echo "usage: make preview-build NAME=<name>"; exit 1; }
+	@$(S)/preview.sh build $(NAME)
+preview-up: ## Build and deploy a preview (NAME=feat)
+	@test -n "$(NAME)" || { echo "usage: make preview-up NAME=<name>"; exit 1; }
+	@$(S)/preview.sh up $(NAME)
+preview-list: ## Show every preview and its URL
+	@$(S)/preview.sh list
+preview-hosts: ## Add the preview hostnames to /etc/hosts (needs sudo)
+	@$(S)/preview.sh hosts
+preview-sso: ## Re-register the preview callback URLs with Keycloak (after make identity)
+	@$(S)/preview.sh sso
+preview-portal: ## Re-add the previews to the homepage (after make install)
+	@$(S)/preview.sh portal
+preview-rm: ## Delete a preview, its namespace and its worktrees (NAME=feat)
+	@test -n "$(NAME)" || { echo "usage: make preview-rm NAME=<name>"; exit 1; }
+	@$(S)/preview.sh rm $(NAME)
 
 ##@ GitOps
 gitops-bootstrap: ## Point Argo CD at a git repo (REPO=https://... [PATH=gitops])

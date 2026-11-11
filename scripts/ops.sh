@@ -534,7 +534,11 @@ cmd_agent_stack() {
   #   agent-stack deploy   apply the overlay (images must already be loaded)
   #   agent-stack          both
   local sub="${1:-all}"
-  local SRC="${BUILD_DIR}/template-src"
+  # PREVIEW_SRC/PREVIEW_TAG let scripts/preview.sh reuse this build verbatim
+  # against a worktree instead of the pinned clone. Unset, nothing changes.
+  local SRC="${PREVIEW_SRC:-${BUILD_DIR}/template-src}"
+  local AGENT_TAG="${PREVIEW_TAG:-local-config}"
+  local UI_TAG="${PREVIEW_TAG:-local}"
   # The agent is not built from source: upstream publishes the image, and
   # these two pins are the same release -- 75072ae IS tag dev-1.0.25. The
   # clone is still needed because the published image ships an empty
@@ -556,24 +560,20 @@ cmd_agent_stack() {
     git -C "${dir}" checkout -q "${sha}" || die "could not check out ${repo}@${sha}"
   }
 
-  _load() { # _load <image> -- `kind load docker-image` does not see podman's
-            # store, so go through an archive.
-    local img="$1"
-    local tar="${BUILD_DIR}/$(tr '/:' '__' <<<"${img}").tar"
-    "${CE}" save -o "${tar}" "${img}" >/dev/null 2>&1 || die "could not save ${img}"
-    kind load image-archive "${tar}" --name "${CLUSTER_NAME}" >/dev/null 2>&1 \
-      || die "could not load ${img} into ${CLUSTER_NAME}"
-    rm -f "${tar}"
-  }
+  _load() { load_image "$@"; }  # kept as a local alias; see lib.sh
 
   if [[ "${sub}" == "all" || "${sub}" == "build" ]]; then
     need "${CE}"; need git
-    step "cloning template-agent and template-ui at their pinned commits"
-    _clone template-agent "${AGENT_SHA}"
-    _clone template-ui    "${UI_SHA}"
+    if [[ -z "${PREVIEW_SRC:-}" ]]; then
+      step "cloning template-agent and template-ui at their pinned commits"
+      _clone template-agent "${AGENT_SHA}"
+      _clone template-ui    "${UI_SHA}"
+    else
+      step "building from ${SRC}"
+    fi
 
     step "building template-ui"
-    "${CE}" build -q -t localhost/template-ui:local \
+    "${CE}" build -q -t "localhost/template-ui:${UI_TAG}" \
       -f "${SRC}/template-ui/Containerfile" "${SRC}/template-ui" >/dev/null \
       || die "template-ui build failed"
 
@@ -581,30 +581,10 @@ cmd_agent_stack() {
     "${CE}" pull -q "${AGENT_IMAGE}" >/dev/null \
       || die "could not pull ${AGENT_IMAGE}"
 
-    # Sandbox runtimes. The images and their bases are declared once, in
-    # the backend module, and read back out here -- a table duplicated in
-    # a shell script is a table that drifts.
-    local BACKEND="${ROOT_DIR}/apps/template-agent/patch/openshell_backend.py"
-    local rt base tag
-    while read -r rt tag base; do
-      [[ -n "${rt}" ]] || continue
-      step "building sandbox runtime ${rt} (${base} + python3)"
-      "${CE}" build -q -t "${tag#localhost/}" --build-arg "SANDBOX_BASE_IMAGE=${base}" \
-        -f "${ROOT_DIR}/apps/template-agent/patch/Containerfile.sandbox" \
-        "${ROOT_DIR}/apps/template-agent/patch" >/dev/null \
-        || die "sandbox runtime ${rt} build failed"
-      _load "${tag#localhost/}"
-    done < <(python3 - "${BACKEND}" <<'PYEOF'
-import ast, sys
-tree = ast.parse(open(sys.argv[1]).read())
-top = {t.id: ast.literal_eval(n.value)
-       for n in tree.body if isinstance(n, ast.Assign)
-       for t in n.targets
-       if isinstance(t, ast.Name) and t.id in ("RUNTIMES", "DERIVED_FROM")}
-for name, base in top["DERIVED_FROM"].items():
-    print(name, top["RUNTIMES"][name], base)
-PYEOF
-    )
+    # No sandbox runtime images are built here any more: RUNTIMES in
+    # openshell_backend.py names the published Hummingbird images and the
+    # kubelet pulls them. The node and go images have no python3, so only
+    # `execute` works in those runtimes -- see the comment on RUNTIMES.
 
     # The agent image ships an empty /app/config/agent: its Containerfile
     # sets CONFIG_PATH but never copies config in, so the agent exits with
@@ -671,6 +651,10 @@ programmatically, check a value, or inspect the sandbox environment.
   `openshell_use_runtime` with "node" or "go" first. Each runtime is a
   separate pod with its own filesystem, and the first command after a
   switch is slow because the image has to be pulled.
+- IMPORTANT: only the python runtime supports the file tools. The node and
+  go images have no python3, and `read_file`, `write_file`, `edit_file`,
+  `ls`, `glob` and `grep` are implemented with it. In those runtimes use
+  `execute` instead -- `cat`, `ls`, `grep` and a heredoc to write files.
 - It has no network access beyond DNS and no cluster credentials.
 - If a tool returns an error, show it rather than guessing at a cause.
 PROMPTEOF
@@ -679,15 +663,15 @@ PROMPTEOF
 
     cp "${ROOT_DIR}/apps/template-agent/patch/openshell_backend.py" \
        "${SRC}/template-agent/openshell_backend.py"
-    "${CE}" build -q -t localhost/template-agent:local-config \
+    "${CE}" build -q -t "localhost/template-agent:${AGENT_TAG}" \
       --build-arg "AGENT_BASE_IMAGE=${AGENT_IMAGE}" \
       -f "${ROOT_DIR}/apps/template-agent/patch/Containerfile.agent" \
       "${SRC}/template-agent" >/dev/null \
       || die "agent config/tools layer build failed"
 
     step "loading images into ${CLUSTER_NAME}"
-    _load localhost/template-agent:local-config
-    _load localhost/template-ui:local
+    _load "localhost/template-agent:${AGENT_TAG}"
+    _load "localhost/template-ui:${UI_TAG}"
     ok "images built and loaded"
   fi
 
@@ -699,6 +683,17 @@ PROMPTEOF
     kc label namespace "${NS}" \
       pod-security.kubernetes.io/enforce=baseline \
       pod-security.kubernetes.io/warn=restricted --overwrite >/dev/null
+
+    # Both deployments mount this to extend their CA bundle. platform-install
+    # creates it only in the namespaces it knows about, so on a fresh cluster
+    # this namespace has none and the pods hang in Init on FailedMount.
+    local ca_file="${ROOT_DIR}/.secrets/platform-root-ca.crt"
+    if [[ -s "${ca_file}" ]]; then
+      kc -n "${NS}" create configmap platform-ca --from-file=ca.crt="${ca_file}" \
+        --dry-run=client -o yaml | kc apply -f - >/dev/null
+    else
+      warn "no ${ca_file}; the agent will not trust platform certificates -- run: make trust-ca"
+    fi
 
     # The UI refuses to start without COOKIE_SIGN (>=32 chars) and upstream's
     # overlay never supplies it. Generated once, reused on re-deploys.

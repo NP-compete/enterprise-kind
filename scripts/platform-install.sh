@@ -527,6 +527,12 @@ fi
 kc apply -f "$(render "${M}/openshell-ingress.yaml")" >/dev/null
 ok "openshell gateway ready at https://openshell.${BASE_DOMAIN} (make openshell)"
 
+# Read-only browser console over the gateway. Unofficial upstream, and it
+# has no login of its own, so the Ingress it ships sits behind oauth2-proxy
+# -- see the header of the manifest before changing anything there.
+kc apply -f "$(render "${M}/openshell-ui.yaml")" >/dev/null
+ok "openshell console ready at https://openshell-ui.${BASE_DOMAIN}"
+
 kc apply -f "${M}/platform-quotas.yaml" >/dev/null
 kc apply -f "${M}/tenant-namespace.yaml" >/dev/null
 # Pulling from the registry now needs credentials (containerd ignores auth in

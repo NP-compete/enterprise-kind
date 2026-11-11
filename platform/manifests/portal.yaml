@@ -66,21 +66,26 @@ data:
     disableUpdateCheck: true
     statusStyle: dot
     layout:
-      Consoles:
-        style: row
-        columns: 3
-      Agents:
+      Console:
         style: row
         columns: 2
       Observability:
         style: row
-        columns: 3
-      Identity:
+        columns: 4
+      Identity and secrets:
         style: row
         columns: 2
       Cluster:
         style: row
-        columns: 2
+        columns: 4
+      Apps:
+        style: row
+        columns: 1
+      # Nested group: one tile per template-agent worktree.
+      template-agent:
+        parent: Apps
+        style: row
+        columns: 3
 
   widgets.yaml: |
     - kubernetes:
@@ -105,36 +110,23 @@ data:
           dateStyle: short
 
   services.yaml: |
-    - Consoles:
+    - Console:
         - Headlamp:
             href: https://headlamp.${BASE_DOMAIN}${URL_SUFFIX}
             siteMonitor: https://headlamp.${BASE_DOMAIN}${URL_SUFFIX}
             description: Manage every Kubernetes resource -- browse, edit, exec, logs
             icon: kubernetes.png
-        - Argo CD:
-            href: https://argocd.${BASE_DOMAIN}${URL_SUFFIX}
-            siteMonitor: https://argocd.${BASE_DOMAIN}${URL_SUFFIX}
-            description: GitOps delivery and application health
-            icon: argo-cd.png
+        - Platform Overview:
+            href: https://grafana.${BASE_DOMAIN}${URL_SUFFIX}/d/platform-overview
+            description: Capacity, ingress traffic, restarts and error logs
+            icon: grafana.png
+
+    - Observability:
         - Grafana:
             href: https://grafana.${BASE_DOMAIN}${URL_SUFFIX}
             siteMonitor: https://grafana.${BASE_DOMAIN}${URL_SUFFIX}
             description: Dashboards over metrics, logs and traces
             icon: grafana.png
-
-    - Agents:
-        - Agent UI:
-            href: https://agent-ui.${BASE_DOMAIN}${URL_SUFFIX}
-            siteMonitor: https://agent-ui.${BASE_DOMAIN}${URL_SUFFIX}
-            description: Red Hat template-ui -- chat against the agent
-            icon: mdi-robot-happy
-        - Agent API:
-            href: https://agent.${BASE_DOMAIN}${URL_SUFFIX}
-            siteMonitor: https://agent.${BASE_DOMAIN}${URL_SUFFIX}/health
-            description: template-agent (LangGraph) -- needs VLLM_BASE_URL to answer
-            icon: mdi-api
-
-    - Observability:
         - Prometheus:
             href: https://prometheus.${BASE_DOMAIN}${URL_SUFFIX}
             siteMonitor: https://prometheus.${BASE_DOMAIN}${URL_SUFFIX}
@@ -145,12 +137,12 @@ data:
             siteMonitor: https://alertmanager.${BASE_DOMAIN}${URL_SUFFIX}
             description: Alert routing, grouping and silences
             icon: alertmanager.png
-        - Platform Overview:
-            href: https://grafana.${BASE_DOMAIN}${URL_SUFFIX}/d/platform-overview
-            description: Capacity, ingress traffic, restarts and error logs
+        - Loki:
+            description: Logs -- query from Grafana Explore
+            href: https://grafana.${BASE_DOMAIN}${URL_SUFFIX}/explore
             icon: grafana.png
 
-    - Identity:
+    - Identity and secrets:
         - Vault:
             href: https://vault.${BASE_DOMAIN}${URL_SUFFIX}
             siteMonitor: https://vault.${BASE_DOMAIN}${URL_SUFFIX}/v1/sys/health?standbyok=true&sealedcode=200&uninitcode=200
@@ -166,13 +158,13 @@ data:
             siteMonitor: https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/realms/platform/.well-known/openid-configuration
             description: Platform realm admin -- log in with the MASTER admin password, not SSO
             icon: keycloak.png
-        - My account:
-            href: https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/realms/platform/account
-            siteMonitor: https://keycloak.${BASE_DOMAIN}${URL_SUFFIX}/realms/platform/.well-known/openid-configuration
-            description: Your own profile, password and sessions -- SSO login
-            icon: keycloak.png
 
     - Cluster:
+        - Argo CD:
+            href: https://argocd.${BASE_DOMAIN}${URL_SUFFIX}
+            siteMonitor: https://argocd.${BASE_DOMAIN}${URL_SUFFIX}
+            description: GitOps delivery and application health
+            icon: argo-cd.png
         - Network flows:
             href: https://flows.${BASE_DOMAIN}${URL_SUFFIX}
             siteMonitor: https://flows.${BASE_DOMAIN}${URL_SUFFIX}
@@ -183,10 +175,34 @@ data:
             siteMonitor: https://registry.${BASE_DOMAIN}${URL_SUFFIX}
             description: "Images (TLS+auth; prompts for registry login) -- push: make push IMG=app:tag"
             icon: docker.png
-        - Loki:
-            description: Logs -- query from Grafana Explore
-            href: https://grafana.${BASE_DOMAIN}${URL_SUFFIX}/explore
-            icon: grafana.png
+        - OpenShell:
+            href: https://openshell-ui.${BASE_DOMAIN}${URL_SUFFIX}
+            siteMonitor: https://openshell-ui.${BASE_DOMAIN}${URL_SUFFIX}
+            description: Sandboxes the agents run code in -- read-only console
+            icon: mdi-console
+
+    # One app, one tile per worktree. These three are the standing set, so
+    # they are committed; `make preview-portal` rewrites the whole subgroup
+    # from whatever worktrees actually exist, so adding a fourth needs no
+    # edit here. The non-preview deployment in the template-agent namespace
+    # (agent-ui.${BASE_DOMAIN}) is deliberately not listed.
+    - Apps:
+        - template-agent:
+            - main:
+                href: https://agent-ui-main.${BASE_DOMAIN}${URL_SUFFIX}
+                siteMonitor: https://agent-ui-main.${BASE_DOMAIN}${URL_SUFFIX}
+                description: namespace ta-main, shared data plane
+                icon: mdi-robot-happy
+            - daytona:
+                href: https://agent-ui-daytona.${BASE_DOMAIN}${URL_SUFFIX}
+                siteMonitor: https://agent-ui-daytona.${BASE_DOMAIN}${URL_SUFFIX}
+                description: namespace ta-daytona, shared data plane
+                icon: mdi-source-branch
+            - openshell:
+                href: https://agent-ui-openshell.${BASE_DOMAIN}${URL_SUFFIX}
+                siteMonitor: https://agent-ui-openshell.${BASE_DOMAIN}${URL_SUFFIX}
+                description: namespace ta-openshell, shared data plane
+                icon: mdi-source-branch
 
   bookmarks.yaml: |
     - Runbook:

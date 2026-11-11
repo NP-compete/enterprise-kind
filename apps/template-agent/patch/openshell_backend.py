@@ -89,23 +89,31 @@ NAMESPACE = os.environ.get("SANDBOX_NAMESPACE", "template-agent")
 # disallow-latest-tag is enforcing here, mostly because a floating base for
 # a sandbox means the environment changes under the agent without anything
 # in git moving.
-# A sandbox image needs more than its own runtime: BaseSandbox implements
-# read, ls, grep, glob and edit as python3 scripts piped through the shell,
-# so an image without python3 supports `execute` and nothing else. The
-# Hummingbird Python image has it; the others need one package added, which
-# cannot happen in the pod -- its egress is DNS-only by policy. So they are
-# derived at build time instead, by scripts/ops.sh, and loaded into the
-# cluster the same way the agent image is. This map is the single source of
-# truth for both: ops.sh reads it out of this file.
-DERIVED_FROM = {
+# Used as published, with nothing added.
+#
+# This is a deliberate trade, not an oversight. BaseSandbox implements
+# read, ls, grep, glob, edit and write as python3 scripts piped through the
+# shell, and only `execute` is pure shell -- so on an image without
+# python3, seven of the eight file tools fail at the point of use. Of these
+# three only hi/python ships python3:
+#
+#   hi/python:3.14-builder   python3 present -- all tools work
+#   hi/nodejs:22-builder     no python3 -- `execute` only
+#   hi/go:1.25.10-builder    no python3 -- `execute` only
+#
+# The pod cannot install it for itself: sandbox egress is DNS-only by
+# policy. Adding it at build time is what the derived localhost/
+# openshell-sandbox-* images used to do; using the published images
+# directly is simpler and keeps the sandbox exactly what Red Hat ships, at
+# the cost of file tools in the node and go runtimes. PROMPT.md tells the
+# model about the limit so it reaches for `execute` there instead.
+RUNTIMES = {
+    "python": "registry.access.redhat.com/hi/python:3.14-builder",
     "node": "registry.access.redhat.com/hi/nodejs:22-builder",
     "go": "registry.access.redhat.com/hi/go:1.25.10-builder",
 }
-RUNTIMES = {
-    "python": "registry.access.redhat.com/hi/python:3.14-builder",
-    "node": "localhost/openshell-sandbox-node:22",
-    "go": "localhost/openshell-sandbox-go:1.25.10",
-}
+# Runtimes where only `execute` works, for the warning in use_runtime.
+NO_PYTHON3 = ("node", "go")
 DEFAULT_RUNTIME = os.environ.get("SANDBOX_RUNTIME", "python")
 # Escape hatch for a one-off image, applied to the default runtime only.
 if os.environ.get("SANDBOX_IMAGE"):
@@ -560,7 +568,15 @@ def openshell_use_runtime(name: str) -> str:
         return f"error: unknown runtime {name!r}; choose one of {sorted(RUNTIMES)}"
     _active_runtime = name
     _emit("openshell_runtime_selected", runtime=name, image=RUNTIMES[name])
-    return f"runtime is now {name} ({RUNTIMES[name]}); its filesystem is separate from the others"
+    note = (
+        " This image has no python3, so read_file, write_file, edit_file, ls,"
+        " glob and grep will NOT work here -- use `execute` with shell"
+        " commands instead."
+        if name in NO_PYTHON3
+        else ""
+    )
+    return (f"runtime is now {name} ({RUNTIMES[name]}); its filesystem is "
+            f"separate from the others.{note}")
 
 
 @tool
