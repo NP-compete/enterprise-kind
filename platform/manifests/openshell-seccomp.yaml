@@ -1,4 +1,23 @@
 ---
+# The installer below needs hostPath to reach the kubelet's seccomp
+# directory, and the cluster-wide PodSecurity default (baseline) forbids it.
+# Velero's node-agent needs the same thing and gets the same exemption.
+#
+# It gets its own namespace rather than relaxing ns/openshell: the gateway
+# keeps running under the default policy, and the only thing privileged
+# here is a pod that writes one file and sleeps.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshell-seccomp
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/audit: privileged
+    platform.kind.local/component: sandboxing
+    app.kubernetes.io/name: openshell-seccomp
+    owner: platform-team
+---
 # Lets OpenShell's gateway-provisioned sandboxes start.
 #
 # The supervisor calls unshare(CLONE_NEWUSER) to build the sandbox it puts
@@ -19,11 +38,15 @@
 # Localhost rather than Unconfined on purpose: PodSecurity "baseline" is
 # enforced in openshell-sandboxes and forbids Unconfined, but permits a
 # named profile. The namespace keeps its policy level.
+#
+# The installer runs in its own namespace, not in openshell-sandboxes: the
+# component that relaxes a policy has no business living inside the
+# namespace it relaxes it for.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: openshell-seccomp-profile
-  namespace: openshell-sandboxes
+  namespace: openshell-seccomp
   labels:
     app.kubernetes.io/name: openshell
     owner: platform-team
@@ -884,7 +907,7 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: openshell-seccomp-installer
-  namespace: openshell-sandboxes
+  namespace: openshell-seccomp
   labels:
     app.kubernetes.io/name: openshell-seccomp-installer
     owner: platform-team
