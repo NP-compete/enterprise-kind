@@ -127,18 +127,39 @@ openshell status
 ## Known limitation: gateway-provisioned sandboxes
 
 The gateway runs, authenticates and reports healthy, but it **cannot start
-sandboxes under rootless podman**. Both settings of
-`server.enableUserNamespaces` fail, in different places:
+sandboxes here**. Both settings of `server.enableUserNamespaces` fail, for
+two unrelated reasons:
 
 | Setting | Failure |
 |---|---|
+| `true` | the pod sets `hostUsers: false` and the kubelet cannot create it at all: `failed to create network namespace: failed to set effective UID: invalid argument` |
 | `false` (what we ship) | the supervisor attaches its boundary, then dies with `failed to spawn sandbox entrypoint process: Permission denied` |
-| `true` | the pod sets `hostUsers: false` and the kubelet cannot create it at all: `failed to create network namespace: failed to set effective UID: invalid argument` — a user namespace cannot be nested inside the already-user-namespaced rootless podman container |
 
-`false` is the better failure, so that is what is set.
+The first is genuinely rootless podman. The node's own `uid_map` is
+`0→501 (1 id)` and `1→100000 (1M ids)`, and the kubelet advertises
+`KubeletInUserNamespace: true`; a pod user namespace has to be carved out
+of a range the runtime does not own.
 
-This is a limitation of the host, not of the platform; on a cluster whose
-nodes are real hosts, neither failure applies. The agent's own sandbox tool
+The second is **not**, which took a measurement to establish. A probe pod
+with the supervisor's security posture — non-root, every capability
+dropped — on the same node:
+
+| Syscall | `RuntimeDefault` | `Unconfined` |
+|---|---|---|
+| `landlock_create_ruleset(VERSION)` | ABI v9 | ABI v9 |
+| `seccomp(SET_MODE_FILTER, NEW_LISTENER)` | listener fd | listener fd |
+| `unshare(CLONE_NEWUSER)` | **EPERM** | **0** |
+
+So Landlock and seccomp user-notification both work; the blocker is
+containerd's default seccomp profile, which denies `CLONE_NEWUSER` to
+containers without `CAP_SYS_ADMIN`. The chart hardcodes `RuntimeDefault`
+on sandbox pods and exposes no value to change it, and this cluster's
+`openshell-sandboxes` namespace enforces PodSecurity `baseline`, which
+forbids `Unconfined` outright. A custom `Localhost` profile is allowed
+under `baseline` and would be the way in, if this is ever worth pursuing.
+
+`false` is the better failure of the two: it fails inside a pod that policy
+already constrains, rather than in the kubelet. The agent's own sandbox tool
 therefore drives the Agent Sandbox CRD directly (see
 `apps/template-agent/patch/openshell_backend.py`), which works because those
 pods do not set `hostUsers`.

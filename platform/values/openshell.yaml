@@ -66,19 +66,34 @@ server:
     # token is rejected. platform-install.sh puts this ConfigMap in the
     # namespace.
     caConfigMapName: platform-ca
-  # Left false: gateway-provisioned sandboxes do not work under rootless
-  # podman either way, and true is the worse failure.
+  # Left false. Both settings fail here, for unrelated reasons -- measured,
+  # not inferred (see docs/openshell.md):
   #
-  #   false -> supervisor attaches its boundary, then dies with
-  #            "failed to spawn sandbox entrypoint process: Permission denied"
-  #   true  -> hostUsers: false, and the kubelet cannot create the pod at all:
-  #            "failed to create network namespace: failed to set effective
-  #            UID: invalid argument" -- a user namespace cannot be nested
-  #            inside the already-user-namespaced rootless podman container.
+  #   true  -> hostUsers: false, and the kubelet cannot create the pod at
+  #            all: "failed to create network namespace: failed to set
+  #            effective UID: invalid argument". This one really is rootless
+  #            podman: the node's own uid_map is 0->501 and 1->100000, the
+  #            kubelet runs with KubeletInUserNamespace=true, and a pod
+  #            mapping cannot be carved out of a range the runtime does not
+  #            own.
+  #
+  #   false -> the supervisor starts and dies with "failed to spawn sandbox
+  #            entrypoint process: Permission denied". NOT a rootless-podman
+  #            limitation. A probe pod with the same security posture
+  #            (non-root, all capabilities dropped) shows Landlock (ABI v9)
+  #            and seccomp user-notification both working, and
+  #            unshare(CLONE_NEWUSER) returning EPERM under RuntimeDefault
+  #            but succeeding under Unconfined. The blocker is containerd's
+  #            default seccomp profile, which denies CLONE_NEWUSER to
+  #            containers without CAP_SYS_ADMIN. The chart offers no way to
+  #            change the sandbox pods' profile.
+  #
+  # false is still the better failure: it fails inside a pod that policy
+  # already constrains, rather than in the kubelet.
   #
   # The gateway itself is fine; only its sandbox provisioning is blocked.
   # The agent's built-in tool therefore drives Agent Sandbox directly, which
-  # does work because those pods do not set hostUsers.
+  # works because those pods neither set hostUsers nor need a user namespace.
   enableUserNamespaces: false
   tls:
     # Off, deliberately. The gateway is reached through ingress now, and
